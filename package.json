@@ -1,8 +1,8 @@
 {
   "name": "civicpulse-desktop",
   "private": true,
-  "version": "0.1.0",
-  "description": "Local desktop prototype for civic complaint management",
+  "version": "0.2.0",
+  "description": "Connected Dhaka civic complaint desktop and web app",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron . --dev\"",
@@ -16,6 +16,7 @@
     "package:mac": "npm run build && electron-builder --mac dmg",
     "test": "node --test electron/database.test.cjs server/web.test.cjs",
     "smoke": "node electron/ui-smoke.cjs",
+    "smoke:cloud": "node electron/cloud-smoke.cjs",
     "smoke:package": "node electron/packaged-smoke.cjs"
   },
   "dependencies": {

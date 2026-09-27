@@ -10,17 +10,27 @@ Share that link with citizens. They create their own citizen accounts and submit
 
 Every signed-in user can open **Account security** to change their password. Changing it signs out that account's other sessions. Staff should change the temporary password given by the owner after their first login.
 
+The top-right avatar opens **Account security**. The sidebar sign-out button asks for confirmation for every role. Open browser and desktop sessions show updated shared reports and administration data within about 15 seconds while the app is visible, or when the window regains focus.
+
 Reports stay private to their reporter and administrators until an administrator verifies them. Assigned staff can view the full report after assignment. The public board and other citizens see only verified reports, with approximate map coordinates and no reporter identity, detailed description, or uploaded photos. Rejected and duplicate reports stay off the public board. Administrators can export a case summary as CSV.
 
 Report lists and the public board now load 25 cases at a time. **Load more** requests the next page by case ID; search and status filters run on the server. The case drawer loads one report's full detail only when opened. Dashboard counts and analytics are calculated in SQL across all cases visible to the signed-in role. The map adds older points as more pages are loaded, and tells users how many points are currently shown. Indexes cover common report and history lookups.
 
-## Local laptop app
+## Connected desktop app (version 0.2.0 and later)
 
-Double-click **Start CivicPulse Web.cmd** or run `npm run web:open` from this folder. The local app opens at [127.0.0.1:4173](http://127.0.0.1:4173/) and saves data in `E:\CivicPulse\data\civicpulse.sqlite`. It is separate from the hosted site and is reachable only from this laptop.
+Install the current Windows release on each computer. The desktop app opens the **same hosted CivicPulse service** as the public website. Citizen reports, department changes, and staff actions are stored in the shared Cloudflare database and appear in website and desktop sessions. Internet access is required. Sign in with an account created on the hosted site; previous desktop-only accounts are separate and will not work automatically.
+
+Previous desktop releases stored data in a private SQLite file on each computer. Installing the new version does **not** upload or erase those files. Reports previously entered in the old desktop app remain local and must be reviewed and submitted again to the shared service by their owner. Do not uninstall or delete local data until those reports have been checked. A department created only in an old desktop release must be created once more by the super administrator in the connected app. Departments are shown in **Administration → Departments**; citizens choose **report categories**, so add or assign a category to a new department before expecting it in the report flow.
+
+For recovery of old desktop records, the code retains a legacy local mode (`CIVICPULSE_LEGACY_LOCAL=1`) that reads the existing local SQLite file without sending it to the hosted site. This is for manual review, not shared operation. The new installer normally launches connected mode.
+
+## Local development web app
+
+Double-click **Start CivicPulse Web.cmd** to open the shared hosted website in your browser. For a separate local development server, run `npm run web:open` from this folder. The local development server opens at [127.0.0.1:4173](http://127.0.0.1:4173/) and saves data in `E:\CivicPulse\data\civicpulse.sqlite`. It is separate from the hosted site and is reachable only from this laptop.
 
 On the first local run, the owner setup form needs the private setup key from `E:\CivicPulse\.dev.vars` (`BOOTSTRAP_KEY=`), plus a name, email, and password. Keep that file private. Existing local demo accounts and sample reports are no longer seeded or used. The former demo database at `E:\CivicPulse\data\civicpulse-web.sqlite` is not loaded by the current app; see the security handoff for its cleanup status.
 
-The Electron desktop app uses a separate local file named `civicpulse.sqlite` in the Electron user data directory. For first time setup, set `CIVICPULSE_SETUP_KEY` in the environment if you want to require a setup key. The desktop app is local only; use the public site for shared citizen reports.
+The normal Electron desktop app is connected to the public service. Local or test mode uses a separate `civicpulse.sqlite` in the Electron user data directory and is enabled only with `CIVICPULSE_LEGACY_LOCAL=1`, the development flag, or the isolated smoke-test flag. If using local mode for first time setup, `CIVICPULSE_SETUP_KEY` can require a setup key.
 
 ## Deploy updates
 
@@ -29,6 +39,7 @@ Double-click **Publish CivicPulse.cmd**, or run:
 ```powershell
 npm test
 npm run build
+npm run smoke:cloud
 npx wrangler deploy
 ```
 

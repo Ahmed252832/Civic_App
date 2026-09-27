@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Notification, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { createDatabase } = require('./database.cjs');
@@ -6,6 +6,10 @@ const { createDatabase } = require('./database.cjs');
 let window;
 let database;
 let currentUserId = null;
+const legacyLocalMode = process.env.CIVICPULSE_LEGACY_LOCAL === '1' || process.argv.includes('--dev') || (process.env.CIVICPULSE_TEST_MODE === '1' && !process.env.CIVICPULSE_TEST_REMOTE_URL);
+const cloudUrl = process.env.CIVICPULSE_TEST_MODE === '1' && process.env.CIVICPULSE_TEST_REMOTE_URL
+  ? process.env.CIVICPULSE_TEST_REMOTE_URL
+  : 'https://civicpulse-dhaka.civicpulse-desktop.workers.dev/';
 app.setName('CivicPulse');
 if (process.platform === 'win32') app.setAppUserModelId('org.civicpulse.desktop');
 
@@ -27,18 +31,33 @@ function createWindow() {
     width: 1450, height: 920, minWidth: 1020, minHeight: 680,
     backgroundColor: '#0c1422', title: 'CivicPulse',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.cjs'),
+      ...(legacyLocalMode ? { preload: path.join(__dirname, 'preload.cjs') } : {}),
       contextIsolation: true, nodeIntegration: false, sandbox: true
     }
   });
-  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  window.webContents.on('will-navigate', event => event.preventDefault());
-  const developmentUrl = process.env.VITE_DEV_SERVER_URL || (process.argv.includes('--dev') && 'http://127.0.0.1:5173');
-  if (developmentUrl) window.loadURL(developmentUrl);
-  else window.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+  if (legacyLocalMode) {
+    window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    window.webContents.on('will-navigate', event => event.preventDefault());
+    const developmentUrl = process.env.VITE_DEV_SERVER_URL || (process.argv.includes('--dev') && 'http://127.0.0.1:5173');
+    if (developmentUrl) window.loadURL(developmentUrl);
+    else window.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+  } else {
+    const trustedOrigin = new URL(cloudUrl).origin;
+    window.webContents.setWindowOpenHandler(({ url }) => {
+      if (url.startsWith('https://')) void shell.openExternal(url);
+      return { action: 'deny' };
+    });
+    window.webContents.on('will-navigate', (event, url) => { if (new URL(url).origin !== trustedOrigin) event.preventDefault(); });
+    void window.loadURL(cloudUrl);
+  }
 }
 
 app.whenReady().then(async () => {
+  if (!legacyLocalMode) {
+    createWindow();
+    app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+    return;
+  }
   const dataDirectory = process.env.CIVICPULSE_DATA_DIR || app.getPath('userData');
   database = await createDatabase(path.join(dataDirectory, 'civicpulse.sqlite'));
   ipcMain.handle('civic:request', async (_event, method, payload = {}) => {
