@@ -1,0 +1,20 @@
+node_modules/
+dist/
+release/
+artifacts/
+*.log
+CivicPulse Setup *.exe
+data/
+.dev.vars
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-*
+*.db
+*.cpbk
+*.pem
+*.key
+tsconfig.tsbuildinfo
+.wrangler/
+cloudflare/dry-run/

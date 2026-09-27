@@ -1,0 +1,15 @@
+{
+  "name": "civicpulse-dhaka",
+  "main": "cloudflare/worker.mjs",
+  "compatibility_date": "2026-09-27",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "not_found_handling": "single-page-application"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "CIVIC_STATE", "class_name": "CivicState" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CivicState"] }]
+}
