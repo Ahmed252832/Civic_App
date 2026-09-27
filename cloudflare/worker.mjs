@@ -15,6 +15,16 @@ const csvCell = value => {
   if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
   return `"${text.replaceAll('"', '""')}"`;
 };
+const mailReady = env => Boolean(env.RESEND_API_KEY && env.MAIL_FROM && env.PUBLIC_APP_URL);
+async function sendAccountMail(env, to, purpose, token) {
+  const base = new URL(env.PUBLIC_APP_URL);
+  if (base.protocol !== 'https:') throw new Error('PUBLIC_APP_URL must use HTTPS.');
+  const link = `${base.origin}/#${purpose === 'verify' ? 'verify' : 'reset'}=${encodeURIComponent(token)}`;
+  const subject = purpose === 'verify' ? 'Verify your CivicPulse email' : 'Reset your CivicPulse password';
+  const text = `${subject}\n\nOpen this link: ${link}\n\nThis link expires in ${purpose === 'verify' ? '24 hours' : '30 minutes'}. If you did not request it, ignore this email.`;
+  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: env.MAIL_FROM, to: [to], subject, text }) });
+  if (!response.ok) throw new Error('Email delivery failed. Please try again later.');
+}
 
 export class CivicState {
   constructor(state, env) {
@@ -64,6 +74,9 @@ export class CivicState {
   async fetch(request) {
     try {
       const url = new URL(request.url);
+      if (url.pathname === '/internal/backup' && request.headers.get('x-civic-backup') === this.env.BACKUP_ENCRYPTION_KEY && this.env.BACKUP_ENCRYPTION_KEY) {
+        return json(200, { ok: true, data: this.store.automaticBackupData() });
+      }
       const origin = request.headers.get('Origin');
       if (origin && origin !== url.origin) return json(403, { ok: false, error: 'Cross-origin request refused.' });
       if (url.pathname === '/api/export.csv') {
@@ -80,7 +93,7 @@ export class CivicState {
       const raw = await request.text();
       if (raw.length > 4_000_000) return json(413, { ok: false, error: 'Request is too large.' });
       const { method, payload = {} } = JSON.parse(raw);
-      if (method === 'config') return json(200, { ok: true, data: { demoMode: false, browserMode: true, setupRequired: this.store.setupRequired() } });
+      if (method === 'config') return json(200, { ok: true, data: { demoMode: false, browserMode: true, setupRequired: this.store.setupRequired(), emailEnabled: mailReady(this.env), offsiteBackupEnabled: Boolean(this.env.BACKUP_BUCKET && this.env.BACKUP_ENCRYPTION_KEY) } });
       if (method === 'session') return json(200, { ok: true, data: await this.sessionUser(request) });
       if (method === 'bootstrap') {
         this.rateLimit(request, 'bootstrap', 10);
@@ -92,7 +105,38 @@ export class CivicState {
         this.rateLimit(request, 'register', 8);
         if (this.store.setupRequired()) throw new Error('The platform owner must finish setup first.');
         const user = this.store.register(payload);
+        if (mailReady(this.env)) {
+          try { const issued = this.store.issueAccountToken(user.id, 'verify'); await sendAccountMail(this.env, issued.email, 'verify', issued.token); }
+          catch (error) { console.error('Registration verification email failed:', error instanceof Error ? error.message : 'unknown error'); }
+        }
         return json(200, { ok: true, data: user }, { 'Set-Cookie': await this.newSession(user) });
+      }
+      if (method === 'forgotPassword') {
+        this.rateLimit(request, 'forgot', 5);
+        if (!mailReady(this.env)) throw new Error('Email recovery is not configured yet. Contact the platform owner.');
+        const account = this.store.findActiveEmail(payload.email);
+        if (account) {
+          try { const issued = this.store.issueAccountToken(account.id, 'reset'); await sendAccountMail(this.env, issued.email, 'reset', issued.token); }
+          catch (error) { console.error('Recovery email failed:', error instanceof Error ? error.message : 'unknown error'); }
+        }
+        return json(200, { ok: true, data: true });
+      }
+      if (method === 'resetPassword') {
+        this.rateLimit(request, 'reset', 10);
+        const accountId = this.store.consumeAccountToken(payload.token, 'reset', payload.newPassword);
+        this.state.storage.sql.exec('DELETE FROM sessions WHERE user_id=?', accountId);
+        return json(200, { ok: true, data: true }, { 'Set-Cookie': 'civicpulse_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0' });
+      }
+      if (method === 'recoverWithCode') {
+        this.rateLimit(request, 'recover-code', 8);
+        const accountId = this.store.consumeAccountToken(payload.code, 'recovery', payload.newPassword);
+        this.state.storage.sql.exec('DELETE FROM sessions WHERE user_id=?', accountId);
+        return json(200, { ok: true, data: true }, { 'Set-Cookie': 'civicpulse_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0' });
+      }
+      if (method === 'verifyEmail') {
+        this.rateLimit(request, 'verify', 10);
+        this.store.consumeAccountToken(payload.token, 'verify');
+        return json(200, { ok: true, data: true });
       }
       if (method === 'login') {
         this.rateLimit(request, 'login', 20);
@@ -112,6 +156,18 @@ export class CivicState {
         this.state.storage.sql.exec('DELETE FROM sessions WHERE user_id=?', user.id);
         return json(200, { ok: true, data: true }, { 'Set-Cookie': await this.newSession(user) });
       }
+      if (method === 'requestVerification') {
+        this.rateLimit(request, 'verify-mail', 5);
+        if (!mailReady(this.env)) throw new Error('Email verification is not configured yet.');
+        const issued = this.store.issueAccountToken(user.id, 'verify');
+        await sendAccountMail(this.env, issued.email, 'verify', issued.token);
+        return json(200, { ok: true, data: true });
+      }
+      if (method === 'issueRecoveryCode') {
+        this.rateLimit(request, 'recovery-code-issue', 5);
+        return json(200, { ok: true, data: this.store.issueRecoveryCode(user, payload.password) });
+      }
+      if (method === 'create' && user.role === 'citizen' && mailReady(this.env) && !user.emailVerified) throw new Error('Verify your email before submitting a complaint. Open Account security to resend the link.');
       let data;
       switch (method) {
         case 'snapshot': data = this.store.snapshot(user); break;
@@ -145,6 +201,7 @@ export default {
     const url = new URL(request.url);
     if (url.pathname.startsWith('/api/')) {
       const headers = new Headers(request.headers);
+      headers.delete('x-civic-backup');
       headers.set('x-civic-ip', request.headers.get('CF-Connecting-IP') || 'local');
       const forwarded = new Request(request, { headers });
       return env.CIVIC_STATE.get(env.CIVIC_STATE.idFromName('dhaka')).fetch(forwarded);
@@ -153,5 +210,32 @@ export default {
     const headers = new Headers(response.headers);
     for (const [key, value] of Object.entries(safeHeaders)) headers.set(key, value);
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
-  }
+  },
+  async scheduled(_controller, env) {
+    if (!env.BACKUP_BUCKET || !env.BACKUP_ENCRYPTION_KEY) return;
+    const keyBytes = Uint8Array.from(atob(env.BACKUP_ENCRYPTION_KEY), char => char.charCodeAt(0));
+    if (keyBytes.length !== 32) throw new Error('BACKUP_ENCRYPTION_KEY must be 32 random bytes encoded as base64.');
+    const stub = env.CIVIC_STATE.get(env.CIVIC_STATE.idFromName('dhaka'));
+    const snapshotResponse = await stub.fetch(new Request('https://internal.civicpulse/internal/backup', { headers: { 'x-civic-backup': env.BACKUP_ENCRYPTION_KEY } }));
+    if (!snapshotResponse.ok) throw new Error('Could not read the CivicPulse backup snapshot.');
+    const snapshot = await snapshotResponse.json();
+    if (!snapshot.ok || snapshot.data?.format !== 'civicpulse-offsite-v1') throw new Error('The CivicPulse backup snapshot is incomplete.');
+    const plaintext = new TextEncoder().encode(JSON.stringify(snapshot.data));
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const key = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['encrypt']);
+    const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, plaintext));
+    const body = new Uint8Array(6 + nonce.length + encrypted.length);
+    body.set(new TextEncoder().encode('CPR2V1'));
+    body.set(nonce, 6);
+    body.set(encrypted, 18);
+    const objectKey = `civicpulse-dhaka/${new Date().toISOString().slice(0, 10)}.cpr2`;
+    await env.BACKUP_BUCKET.put(objectKey, body, { httpMetadata: { contentType: 'application/octet-stream' } });
+    if (typeof env.BACKUP_BUCKET.list === 'function') {
+      const listed = await env.BACKUP_BUCKET.list({ prefix: 'civicpulse-dhaka/', limit: 1000 });
+      const backups = listed.objects.filter(object => /^civicpulse-dhaka\/\d{4}-\d{2}-\d{2}\.cpr2$/.test(object.key)).sort((a, b) => b.key.localeCompare(a.key));
+      const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      for (const old of backups.slice(3)) if (old.key.slice(17, 27) < cutoff) await env.BACKUP_BUCKET.delete(old.key);
+    }
+    console.log(`Encrypted offsite backup stored at ${objectKey}; bytes=${body.length}`);
+  },
 };

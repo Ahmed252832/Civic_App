@@ -64,6 +64,9 @@ function createStore(adapter, options = {}) {
     target_type TEXT NOT NULL, target_id INTEGER NOT NULL, detail TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
   run('CREATE TABLE IF NOT EXISTS backup_access (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL)');
+  if (!all('PRAGMA table_info(users)').some(column => column.name === 'email_verified')) run('ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0');
+  run('CREATE TABLE IF NOT EXISTS account_tokens (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), purpose TEXT NOT NULL, issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)');
+  run('CREATE INDEX IF NOT EXISTS account_tokens_user_purpose ON account_tokens(user_id,purpose)');
   run('CREATE INDEX IF NOT EXISTS complaints_reporter_id ON complaints(reporter_id,id)');
   run('CREATE INDEX IF NOT EXISTS complaints_department_id ON complaints(department_id,id)');
   run('CREATE INDEX IF NOT EXISTS complaints_status_id ON complaints(status,id)');
@@ -109,7 +112,7 @@ function createStore(adapter, options = {}) {
   }
   persist();
 
-  const publicUser = row => row && ({ id: row.id, name: row.name, email: row.email, role: row.role, area: row.area, departmentId: row.department_id || null, verifiedArea: Boolean(row.verified_area), active: Boolean(row.active) });
+  const publicUser = row => row && ({ id: row.id, name: row.name, email: row.email, role: row.role, area: row.area, departmentId: row.department_id || null, verifiedArea: Boolean(row.verified_area), emailVerified: Boolean(row.email_verified), active: Boolean(row.active) });
   const store = {
     setupRequired() { return !one("SELECT id FROM users WHERE role='superadmin' LIMIT 1"); },
     bootstrapAdmin(payload) {
@@ -151,6 +154,58 @@ function createStore(adapter, options = {}) {
       return publicUser(user);
     },
     userById(userId) { return publicUser(one('SELECT * FROM users WHERE id=? AND active=1', [userId])); },
+    findActiveEmail(email) {
+      if (typeof email !== 'string' || email.length > 200) return null;
+      return publicUser(one('SELECT * FROM users WHERE lower(email)=lower(?) AND active=1', [safeText(email, 200)]));
+    },
+    issueAccountToken(userId, purpose) {
+      demand(['verify','reset'].includes(purpose), 'Unknown account action.');
+      const user = one('SELECT id,email,email_verified FROM users WHERE id=? AND active=1', [userId]);
+      demand(user, 'Account not found.');
+      if (purpose === 'verify') demand(!user.email_verified, 'Email is already verified.');
+      const now = Date.now();
+      const recent = one('SELECT issued_at FROM account_tokens WHERE user_id=? AND purpose=?', [userId,purpose]);
+      demand(!recent || now - recent.issued_at >= 60_000, 'Please wait a minute before requesting another email.');
+      const token = crypto.randomBytes(32).toString('base64url');
+      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+      transact(() => {
+        run('DELETE FROM account_tokens WHERE user_id=? AND purpose=?', [userId,purpose]);
+        run('DELETE FROM account_tokens WHERE expires_at<=?', [now]);
+        run('INSERT INTO account_tokens (token_hash,user_id,purpose,issued_at,expires_at) VALUES (?,?,?,?,?)', [tokenHash,userId,purpose,now,now + (purpose === 'verify' ? 24 * 60 * 60 * 1000 : 30 * 60 * 1000)]);
+      });
+      return { token, email: user.email };
+    },
+    consumeAccountToken(token, purpose, newPassword) {
+      demand(typeof token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(token), 'Invalid or expired link.');
+      demand(['verify','reset','recovery'].includes(purpose), 'Unknown account action.');
+      if (purpose !== 'verify') demand(typeof newPassword === 'string' && newPassword.length >= 12 && newPassword.length <= 128, 'Use a password of 12 to 128 characters.');
+      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+      return transact(() => {
+        const row = one('SELECT t.user_id FROM account_tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=? AND t.purpose=? AND t.expires_at>? AND u.active=1', [tokenHash,purpose,Date.now()]);
+        demand(row, 'Invalid or expired link.');
+        if (purpose === 'verify') run('UPDATE users SET email_verified=1 WHERE id=?', [row.user_id]);
+        else {
+          run('UPDATE users SET password_hash=? WHERE id=?', [hashPassword(newPassword),row.user_id]);
+          if (purpose === 'reset') run("DELETE FROM account_tokens WHERE user_id=? AND purpose='recovery'", [row.user_id]);
+        }
+        run('DELETE FROM account_tokens WHERE user_id=? AND purpose=?', [row.user_id,purpose]);
+        run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [row.user_id,purpose === 'verify' ? 'Verified email' : 'Recovered password','user',row.user_id,purpose === 'recovery' ? 'Recovery code used' : '']);
+        return row.user_id;
+      });
+    },
+    issueRecoveryCode(user, password) {
+      demand(user, 'Please sign in.');
+      const saved = one('SELECT password_hash FROM users WHERE id=? AND active=1', [user.id]);
+      demand(typeof password === 'string' && password.length <= 128 && saved && verifyPassword(password, saved.password_hash), 'Current password is incorrect.');
+      const token = crypto.randomBytes(32).toString('base64url');
+      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+      transact(() => {
+        run("DELETE FROM account_tokens WHERE user_id=? AND purpose='recovery'", [user.id]);
+        run('INSERT INTO account_tokens (token_hash,user_id,purpose,issued_at,expires_at) VALUES (?,?,?,?,?)', [tokenHash,user.id,'recovery',Date.now(),Date.now() + 365 * 24 * 60 * 60 * 1000]);
+        run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Generated recovery code','user',user.id,'']);
+      });
+      return token;
+    },
     changePassword(user, payload) {
       demand(user, 'Please sign in.');
       const current = String(payload.currentPassword || '');
@@ -161,6 +216,7 @@ function createStore(adapter, options = {}) {
       demand(current !== next, 'Choose a different password.');
       return transact(() => {
         run('UPDATE users SET password_hash=? WHERE id=?', [hashPassword(next), user.id]);
+        run("DELETE FROM account_tokens WHERE user_id=? AND purpose='recovery'", [user.id]);
         run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Changed password','user',user.id,'']);
         return true;
       });
@@ -197,6 +253,9 @@ function createStore(adapter, options = {}) {
       requireRole(user, ['superadmin']);
       const tokenHash = crypto.createHash('sha256').update(String(payload.token || '')).digest('hex');
       return transact(() => { run('DELETE FROM backup_access WHERE token_hash=? AND user_id=?', [tokenHash,user.id]); return true; });
+    },
+    automaticBackupData() {
+      return transact(() => ({ format: 'civicpulse-offsite-v1', createdAt: new Date().toISOString(), tables: Object.fromEntries(BACKUP_TABLES.map(table => [table, all(`SELECT * FROM ${table} ORDER BY id`)])) }));
     },
     listComplaints(user, payload = {}) {
       demand(user, 'Please sign in.');

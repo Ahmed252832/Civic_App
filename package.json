@@ -14,7 +14,7 @@
     "cloud:deploy": "npm run build && wrangler deploy",
     "package:win": "npm run build && node electron/package-win.cjs",
     "package:mac": "npm run build && electron-builder --mac dmg",
-    "test": "node --test electron/database.test.cjs server/web.test.cjs",
+    "test": "node --test electron/database.test.cjs server/web.test.cjs cloudflare/worker.test.mjs",
     "smoke": "node electron/ui-smoke.cjs",
     "smoke:cloud": "node electron/cloud-smoke.cjs",
     "smoke:package": "node electron/packaged-smoke.cjs"

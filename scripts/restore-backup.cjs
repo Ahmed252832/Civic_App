@@ -19,6 +19,17 @@ function decryptBackup(bytes, passphrase) {
   if (archive.format !== 'civicpulse-backup-v1' || !archive.tables || TABLES.some(table => !Array.isArray(archive.tables[table]))) throw new Error('Backup contents are incomplete.');
   return archive;
 }
+function decryptOffsiteBackup(bytes, keyBase64) {
+  if (bytes.length < 35 || bytes.subarray(0, 6).toString() !== 'CPR2V1') throw new Error('Unrecognized offsite backup format.');
+  const key = Buffer.from(keyBase64 || '', 'base64');
+  if (key.length !== 32) throw new Error('CIVICPULSE_BACKUP_KEY must be the original 32-byte base64 backup key.');
+  const body = bytes.subarray(18);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, bytes.subarray(6, 18));
+  decipher.setAuthTag(body.subarray(body.length - 16));
+  const archive = JSON.parse(Buffer.concat([decipher.update(body.subarray(0, body.length - 16)), decipher.final()]).toString('utf8'));
+  if (archive.format !== 'civicpulse-offsite-v1' || !archive.tables || TABLES.some(table => !Array.isArray(archive.tables[table]))) throw new Error('Offsite backup contents are incomplete.');
+  return archive;
+}
 
 async function restoreNew(archive, output) {
   const target = path.resolve(output);
@@ -72,11 +83,13 @@ function secretPrompt(question) {
 
 async function main() {
   const [input, output] = process.argv.slice(2);
-  if (!input) throw new Error('Usage: node scripts/restore-backup.cjs <backup.cpbk> [new-database.sqlite]');
+  if (!input) throw new Error('Usage: node scripts/restore-backup.cjs <backup.cpbk|backup.cpr2> [new-database.sqlite]');
   const stat = fs.statSync(input);
   if (stat.size > MAX_BACKUP_BYTES) throw new Error('Backup exceeds the 200 MB restore limit.');
-  const passphrase = await secretPrompt('Backup passphrase: ');
-  const archive = decryptBackup(fs.readFileSync(input), passphrase);
+  const bytes = fs.readFileSync(input);
+  const archive = bytes.subarray(0, 6).toString() === 'CPR2V1'
+    ? decryptOffsiteBackup(bytes, process.env.CIVICPULSE_BACKUP_KEY)
+    : decryptBackup(bytes, await secretPrompt('Backup passphrase: '));
   const counts = Object.fromEntries(TABLES.map(table => [table, archive.tables[table].length]));
   if (output) console.log(`Restored and checked: ${await restoreNew(archive, output)}`);
   else console.log('Backup decrypted and validated. Pass a new SQLite filename to restore.');
@@ -84,4 +97,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { decryptBackup, restoreNew };
+module.exports = { decryptBackup, decryptOffsiteBackup, restoreNew };

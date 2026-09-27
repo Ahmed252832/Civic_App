@@ -85,8 +85,20 @@ async function createWebServer(options = {}) {
         const body = await readJson(req);
         const method = body.method;
         const payload = body.payload || {};
-        if (method === 'config') return sendJson(res, 200, { ok: true, data: { demoMode: false, browserMode: true, setupRequired: database.setupRequired() } });
+        if (method === 'config') return sendJson(res, 200, { ok: true, data: { demoMode: false, browserMode: true, setupRequired: database.setupRequired(), emailEnabled: false, offsiteBackupEnabled: false } });
         if (method === 'session') return sendJson(res, 200, { ok: true, data: sessionUser(req) });
+        if (method === 'forgotPassword' || method === 'requestVerification') throw new Error('Email delivery is only available on the hosted site after a mail provider is configured.');
+        if (method === 'verifyEmail') return sendJson(res, 200, { ok: true, data: Boolean(database.consumeAccountToken(payload.token, 'verify')) });
+        if (method === 'resetPassword') {
+          const userId = database.consumeAccountToken(payload.token, 'reset', payload.newPassword);
+          for (const [token, session] of sessions) if (session.userId === userId) sessions.delete(token);
+          return sendJson(res, 200, { ok: true, data: true }, { 'Set-Cookie': 'civicpulse_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' });
+        }
+        if (method === 'recoverWithCode') {
+          const userId = database.consumeAccountToken(payload.code, 'recovery', payload.newPassword);
+          for (const [token, session] of sessions) if (session.userId === userId) sessions.delete(token);
+          return sendJson(res, 200, { ok: true, data: true }, { 'Set-Cookie': 'civicpulse_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' });
+        }
         if (method === 'bootstrap') {
           if (!setupKey || payload.key !== setupKey) throw new Error('Invalid setup key.');
           const account = database.bootstrapAdmin(payload);
@@ -122,6 +134,7 @@ async function createWebServer(options = {}) {
           sessions.set(token, { userId: actor.id, expires: Date.now() + SESSION_SECONDS * 1000 });
           return sendJson(res, 200, { ok: true, data: true }, { 'Set-Cookie': `civicpulse_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_SECONDS}` });
         }
+        if (method === 'issueRecoveryCode') return sendJson(res, 200, { ok: true, data: database.issueRecoveryCode(actor, payload.password) });
         let result;
         switch (method) {
           case 'snapshot': result = database.snapshot(actor); break;

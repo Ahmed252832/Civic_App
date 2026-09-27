@@ -1,5 +1,5 @@
 export type Role = 'citizen' | 'staff' | 'admin' | 'superadmin';
-export type User = { id: number; name: string; email: string; role: Role; area: string; departmentId: number | null; verifiedArea: boolean; active: boolean };
+export type User = { id: number; name: string; email: string; role: Role; area: string; departmentId: number | null; verifiedArea: boolean; emailVerified: boolean; active: boolean };
 export type Complaint = {
   id: number; code: string; reporter_id: number | null; reporter: string; title: string; description: string;
   category_id: number; category: string; area: string; latitude: number; longitude: number;

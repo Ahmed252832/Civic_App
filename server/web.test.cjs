@@ -62,6 +62,16 @@ test('web API protects reports and revokes disabled staff sessions', async () =>
     assert.equal((await call('session', {}, citizen.cookie)).body.data, null);
     assert.equal((await call('session', {}, changed.cookie)).body.data.role, 'citizen');
     assert.equal((await call('login', { email: 'first@example.test', password: 'citizen-password-123' })).body.ok, false);
+    assert.equal((await call('forgotPassword', { email: 'first@example.test' })).body.ok, false);
+    const recovery = database.issueAccountToken(citizen.body.data.id, 'reset');
+    assert.equal((await call('resetPassword', { token: recovery.token, newPassword: 'recovered-citizen-password-123' })).body.ok, true);
+    assert.equal((await call('session', {}, changed.cookie)).body.data, null);
+    const recovered = await call('login', { email: 'first@example.test', password: 'recovered-citizen-password-123' });
+    assert.equal(recovered.body.ok, true);
+    const code = await call('issueRecoveryCode', { password: 'recovered-citizen-password-123' }, recovered.cookie);
+    assert.equal(code.body.data.length, 43);
+    assert.equal((await call('recoverWithCode', { code: code.body.data, newPassword: 'code-recovered-password-123' })).body.ok, true);
+    assert.equal((await call('session', {}, recovered.cookie)).body.data, null);
     assert.match(complaintCsv([{ code: 'C-9', title: '=HYPERLINK("x")', category: 'Other', area: 'Dhanmondi', severity: 'Low', priority: 'Normal', status: 'Submitted' }]), /'=HYPERLINK/);
   } finally {
     server.closeAllConnections();
