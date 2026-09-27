@@ -35,6 +35,7 @@ function createStore(adapter, options = {}) {
   run(`CREATE TABLE IF NOT EXISTS departments (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1)`);
   if (!all('PRAGMA table_info(users)').some(column => column.name === 'department_id')) run('ALTER TABLE users ADD COLUMN department_id INTEGER REFERENCES departments(id)');
   run(`CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, department_id INTEGER REFERENCES departments(id), active INTEGER NOT NULL DEFAULT 1)`);
+  if (!all('PRAGMA table_info(categories)').some(column => column.name === 'resolution_hours')) run('ALTER TABLE categories ADD COLUMN resolution_hours INTEGER NOT NULL DEFAULT 168');
   run(`CREATE TABLE IF NOT EXISTS complaints (
     id INTEGER PRIMARY KEY, code TEXT UNIQUE, reporter_id INTEGER NOT NULL REFERENCES users(id),
     title TEXT NOT NULL, description TEXT NOT NULL, category_id INTEGER NOT NULL REFERENCES categories(id),
@@ -43,6 +44,11 @@ function createStore(adapter, options = {}) {
     department_id INTEGER REFERENCES departments(id), image TEXT, completion_image TEXT,
     duplicate_of INTEGER REFERENCES complaints(id), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, resolved_at TEXT)`);
+  const complaintColumns = new Set(all('PRAGMA table_info(complaints)').map(column => column.name));
+  if (!complaintColumns.has('resolution_due_at')) run('ALTER TABLE complaints ADD COLUMN resolution_due_at TEXT');
+  if (!complaintColumns.has('closed_at')) run('ALTER TABLE complaints ADD COLUMN closed_at TEXT');
+  if (!complaintColumns.has('recurrence_of')) run('ALTER TABLE complaints ADD COLUMN recurrence_of INTEGER REFERENCES complaints(id)');
+  run("UPDATE complaints SET resolution_due_at=(SELECT datetime(complaints.created_at, '+' || COALESCE(k.resolution_hours,168) || ' hours') FROM categories k WHERE k.id=complaints.category_id) WHERE resolution_due_at IS NULL");
   run('CREATE TABLE IF NOT EXISTS area_counts (area_key TEXT PRIMARY KEY, total INTEGER NOT NULL)');
   if (!one('SELECT area_key FROM area_counts LIMIT 1') && one('SELECT COUNT(*) AS n FROM complaints').n > 0) {
     run('INSERT INTO area_counts (area_key,total) SELECT lower(trim(area)),COUNT(*) FROM complaints GROUP BY lower(trim(area))');
@@ -54,6 +60,7 @@ function createStore(adapter, options = {}) {
     id INTEGER PRIMARY KEY, complaint_id INTEGER NOT NULL REFERENCES complaints(id), number INTEGER NOT NULL,
     resolved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, reopened_at TEXT, closed_at TEXT,
     UNIQUE(complaint_id, number))`);
+  run("UPDATE complaints SET closed_at=COALESCE((SELECT MAX(y.closed_at) FROM cycles y WHERE y.complaint_id=complaints.id),updated_at) WHERE closed_at IS NULL AND status='Closed'");
   run(`CREATE TABLE IF NOT EXISTS feedback (
     id INTEGER PRIMARY KEY, complaint_id INTEGER NOT NULL REFERENCES complaints(id), cycle_id INTEGER NOT NULL REFERENCES cycles(id),
     user_id INTEGER NOT NULL REFERENCES users(id), rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
@@ -70,6 +77,9 @@ function createStore(adapter, options = {}) {
   run('CREATE INDEX IF NOT EXISTS complaints_reporter_id ON complaints(reporter_id,id)');
   run('CREATE INDEX IF NOT EXISTS complaints_department_id ON complaints(department_id,id)');
   run('CREATE INDEX IF NOT EXISTS complaints_status_id ON complaints(status,id)');
+  run('CREATE INDEX IF NOT EXISTS complaints_resolution_due ON complaints(closed_at,resolution_due_at)');
+  run('CREATE INDEX IF NOT EXISTS complaints_recurrence_of ON complaints(recurrence_of)');
+  run('CREATE INDEX IF NOT EXISTS complaints_category_resolution ON complaints(category_id,status,resolved_at)');
   run('CREATE INDEX IF NOT EXISTS updates_complaint_id ON updates(complaint_id,id)');
   run('CREATE INDEX IF NOT EXISTS feedback_complaint_id ON feedback(complaint_id,id)');
   run('CREATE INDEX IF NOT EXISTS cycles_complaint_id ON cycles(complaint_id,id)');
@@ -97,8 +107,11 @@ function createStore(adapter, options = {}) {
     return { sql: 'c.reporter_id=?', params: [user.id] };
   };
   const privateCase = (user, row) => ['admin','superadmin'].includes(user.role) || row.reporter_id === user.id || (user.role === 'staff' && row.department_id === user.departmentId);
-  const safeCase = (user, row) => privateCase(user, row) ? row : { ...row, reporter_id: null, reporter: 'Resident', description: '', image: null, completion_image: null,
-    latitude: Math.round(row.latitude * 1000) / 1000, longitude: Math.round(row.longitude * 1000) / 1000 };
+  const safeCase = (user, row) => {
+    const visible = privateCase(user, row) ? row : { ...row, reporter_id: null, reporter: 'Resident', description: '', image: null, completion_image: null,
+      latitude: Math.round(row.latitude * 1000) / 1000, longitude: Math.round(row.longitude * 1000) / 1000 };
+    return { ...visible, recurrence_flag: Boolean(row.recurrence_of), recurrence_of: user.role === 'citizen' || !privateCase(user, row) ? null : row.recurrence_of };
+  };
 
   if (!one('SELECT id FROM categories LIMIT 1')) {
     transact(() => {
@@ -267,12 +280,14 @@ function createStore(adapter, options = {}) {
       if (scope === 'Assigned to my department' && user.role === 'staff') { where.push('c.department_id=?'); params.push(user.departmentId || -1); }
       if (scope === 'Needs verification' && ['admin','superadmin'].includes(user.role)) where.push("c.status='Submitted'");
       if (scope === 'Awaiting feedback' && ['admin','superadmin'].includes(user.role)) where.push("c.status='Awaiting Feedback'");
+      if (scope === 'Overdue closure' && ['admin','superadmin'].includes(user.role)) where.push("c.status NOT IN ('Closed','Rejected','Duplicate') AND c.resolution_due_at<CURRENT_TIMESTAMP");
+      if (scope === 'Recurring issues' && ['admin','superadmin'].includes(user.role)) where.push('c.recurrence_of IS NOT NULL');
       if (status && status !== 'All statuses') { where.push('c.status=?'); params.push(status); }
       if (search) { where.push('(c.code LIKE ? OR c.title LIKE ? OR c.area LIKE ? OR k.name LIKE ?)'); params.push(...Array(4).fill(`%${search}%`)); }
       const from = 'FROM complaints c JOIN categories k ON k.id=c.category_id LEFT JOIN departments d ON d.id=c.department_id JOIN users u ON u.id=c.reporter_id';
       const total = one(`SELECT COUNT(*) AS n ${from} WHERE ${where.join(' AND ')}`, params).n;
       if (cursor) { where.push('c.id<?'); params.push(cursor); }
-      const rows = all(`SELECT c.id,c.code,c.reporter_id,c.title,c.description,c.category_id,c.area,c.latitude,c.longitude,c.severity,c.priority,c.status,c.department_id,c.duplicate_of,c.created_at,c.updated_at,c.resolved_at,
+      const rows = all(`SELECT c.id,c.code,c.reporter_id,c.title,c.description,c.category_id,c.area,c.latitude,c.longitude,c.severity,c.priority,c.status,c.department_id,c.duplicate_of,c.recurrence_of,c.resolution_due_at,c.closed_at,c.created_at,c.updated_at,c.resolved_at,
         k.name AS category,d.name AS department,u.name AS reporter ${from} WHERE ${where.join(' AND ')} ORDER BY c.id DESC LIMIT ?`, [...params, limit + 1]);
       const more = rows.length > limit;
       const complaints = rows.slice(0, limit).map(row => safeCase(user, { ...row, image: null, completion_image: null }));
@@ -290,7 +305,9 @@ function createStore(adapter, options = {}) {
       const cycles = all('SELECT * FROM cycles WHERE complaint_id=? ORDER BY id DESC', [complaint.id]);
       const feedback = all(`SELECT f.*,u.name AS author FROM feedback f JOIN users u ON u.id=f.user_id WHERE f.complaint_id=? ORDER BY f.id DESC`, [complaint.id])
         .map(row => fullAccess || row.user_id === user.id ? row : { ...row, user_id: null, author: 'Resident', comment: '' });
-      return { complaint: safeCase(user, complaint), updates, cycles, feedback };
+      const recurrence = complaint.recurrence_of && privateAccess && user.role !== 'citizen'
+        ? one('SELECT code,title,closed_at FROM complaints WHERE id=?', [complaint.recurrence_of]) : null;
+      return { complaint: safeCase(user, complaint), recurrence, updates, cycles, feedback };
     },
     summary(user) {
       demand(user, 'Please sign in.');
@@ -300,7 +317,9 @@ function createStore(adapter, options = {}) {
         SUM(CASE WHEN c.status NOT IN ('Closed','Rejected','Duplicate') THEN 1 ELSE 0 END) AS open,
         SUM(CASE WHEN c.status='Submitted' THEN 1 ELSE 0 END) AS pending,
         SUM(CASE WHEN c.status='Awaiting Feedback' THEN 1 ELSE 0 END) AS awaiting,
-        SUM(CASE WHEN c.severity='Critical' AND c.status!='Closed' THEN 1 ELSE 0 END) AS critical
+        SUM(CASE WHEN c.severity='Critical' AND c.status!='Closed' THEN 1 ELSE 0 END) AS critical,
+        SUM(CASE WHEN c.status NOT IN ('Closed','Rejected','Duplicate') AND c.resolution_due_at<CURRENT_TIMESTAMP THEN 1 ELSE 0 END) AS overdue_closure,
+        SUM(CASE WHEN c.recurrence_of IS NOT NULL THEN 1 ELSE 0 END) AS recurring
         FROM complaints c ${where}`, params);
       const categories = all(`SELECT c.category_id AS id,COUNT(*) AS count FROM complaints c ${where} GROUP BY c.category_id ORDER BY count DESC LIMIT 20`, params);
       const areas = all(`SELECT c.area,COUNT(*) AS count,SUM(CASE WHEN c.status!='Closed' THEN 1 ELSE 0 END) AS open
@@ -322,7 +341,7 @@ function createStore(adapter, options = {}) {
     },
     exportRows(user) {
       requireRole(user, ['admin','superadmin']);
-      return all(`SELECT c.code,c.title,k.name AS category,c.area,c.severity,c.priority,c.status,d.name AS department,c.created_at
+      return all(`SELECT c.code,c.title,k.name AS category,c.area,c.severity,c.priority,c.status,d.name AS department,c.created_at,c.resolution_due_at,c.closed_at,CASE WHEN c.recurrence_of IS NOT NULL THEN 'Yes' ELSE 'No' END AS recurring
         FROM complaints c JOIN categories k ON k.id=c.category_id LEFT JOIN departments d ON d.id=c.department_id ORDER BY c.id DESC`);
     },
     snapshot(user) {
@@ -369,13 +388,18 @@ function createStore(adapter, options = {}) {
       demand(area.length >= 2, 'Enter the area name.');
       demand(Number.isFinite(latitude) && latitude >= -90 && latitude <= 90 && Number.isFinite(longitude) && longitude >= -180 && longitude <= 180, 'Select a valid map location.');
       demand(inDhaka(latitude, longitude), 'Choose a location inside the Dhaka city service area.');
-      demand(one('SELECT id FROM categories WHERE id=? AND active=1', [categoryId]), 'Choose a valid category.');
+      const category = one('SELECT id,resolution_hours FROM categories WHERE id=? AND active=1', [categoryId]);
+      demand(category, 'Choose a valid category.');
       demand(SEVERITIES.includes(payload.severity), 'Choose a valid severity.');
       const image = payload.image || null;
       demand(!image || (typeof image === 'string' && /^data:image\/(png|jpeg|webp);base64,/.test(image) && image.length < 600000), 'Image is too large after optimization.');
       return transact(() => {
-        run(`INSERT INTO complaints (reporter_id,title,description,category_id,area,latitude,longitude,severity,image)
-          VALUES (?,?,?,?,?,?,?,?,?)`, [user.id,title,description,categoryId,area,latitude,longitude,payload.severity,image]);
+        const recurrence = all(`SELECT id,latitude,longitude,closed_at FROM complaints WHERE category_id=? AND status='Closed' AND closed_at>=datetime('now','-90 days')
+          AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? ORDER BY closed_at DESC`, [categoryId,latitude-0.001,latitude+0.001,longitude-0.0013,longitude+0.0013])
+          .map(row => ({ ...row, distance: haversineMeters({ latitude, longitude }, row) }))
+          .filter(row => row.distance <= 100).sort((a,b) => a.distance - b.distance || b.id - a.id)[0];
+        run(`INSERT INTO complaints (reporter_id,title,description,category_id,area,latitude,longitude,severity,image,resolution_due_at,recurrence_of)
+          VALUES (?,?,?,?,?,?,?,?,?,datetime('now','+' || ? || ' hours'),?)`, [user.id,title,description,categoryId,area,latitude,longitude,payload.severity,image,category.resolution_hours,recurrence?.id || null]);
         run('INSERT INTO area_counts (area_key,total) VALUES (lower(trim(?)),1) ON CONFLICT(area_key) DO UPDATE SET total=total+1', [area]);
         const complaintId = id();
         run('UPDATE complaints SET code=? WHERE id=?', [`C-${String(1000 + complaintId)}`, complaintId]);
@@ -385,7 +409,7 @@ function createStore(adapter, options = {}) {
     },
     act(user, payload) {
       const action = safeText(payload.action, 30), note = safeText(payload.note, 1000);
-      demand(['verify','reject','duplicate','assign','close','reopen','priority','start','progress','resolve'].includes(action), 'Unknown action.');
+      demand(['verify','reject','duplicate','assign','close','reopen','priority','start','progress','resolve','dismissRecurrence'].includes(action), 'Unknown action.');
       if (['start','progress','resolve'].includes(action)) requireRole(user, ['staff']);
       else requireRole(user, ['admin','superadmin']);
       const complaint = findComplaint(payload.id);
@@ -416,6 +440,11 @@ function createStore(adapter, options = {}) {
           demand(['Normal','High','Urgent'].includes(payload.priority), 'Choose a valid priority.');
           run('UPDATE complaints SET priority=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', [payload.priority,complaint.id]);
           log(user.id,complaint.id,'Priority changed',complaint.status,complaint.status,payload.priority);
+        } else if (action === 'dismissRecurrence') {
+          demand(complaint.recurrence_of, 'There is no recurrence flag to dismiss.');
+          demand(note.length >= 5, 'Explain why this is not a recurrence.');
+          run('UPDATE complaints SET recurrence_of=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?', [complaint.id]);
+          log(user.id,complaint.id,'Recurrence dismissed',complaint.status,complaint.status,note);
         } else if (action === 'start') {
           demand(['Assigned','Reopened'].includes(complaint.status), 'Only assigned work can be started.');
           changeStatus(complaint,user,'Work started','In Progress',note);
@@ -438,12 +467,15 @@ function createStore(adapter, options = {}) {
           const cycle = one('SELECT * FROM cycles WHERE complaint_id=? ORDER BY number DESC LIMIT 1', [complaint.id]);
           demand(cycle, 'No resolution cycle found.');
           run('UPDATE cycles SET reopened_at=CURRENT_TIMESTAMP WHERE id=?', [cycle.id]);
+          run('UPDATE complaints SET closed_at=NULL WHERE id=?', [complaint.id]);
           changeStatus(complaint,user,'Reopened','Reopened',note);
         } else if (action === 'close') {
           demand(complaint.status === 'Awaiting Feedback', 'Only completed work can be closed.');
           const cycle = one('SELECT * FROM cycles WHERE complaint_id=? ORDER BY number DESC LIMIT 1', [complaint.id]);
           demand(cycle, 'No resolution cycle found.');
+          demand(!one("SELECT id FROM feedback WHERE cycle_id=? AND resolution IN ('No','Partially')", [cycle.id]), 'The reporter disputed this resolution. Reopen the case instead.');
           run('UPDATE cycles SET closed_at=CURRENT_TIMESTAMP WHERE id=?', [cycle.id]);
+          run('UPDATE complaints SET closed_at=CURRENT_TIMESTAMP WHERE id=?', [complaint.id]);
           changeStatus(complaint,user,'Closed','Closed',note);
         } else throw new Error('Unknown action.');
         return true;
@@ -464,11 +496,26 @@ function createStore(adapter, options = {}) {
         const local = Number(user.verifiedArea && user.area === complaint.area);
         run('INSERT INTO feedback (complaint_id,cycle_id,user_id,rating,resolution,comment,local) VALUES (?,?,?,?,?,?,?)', [complaint.id,cycle.id,user.id,rating,resolution,comment,local]);
         log(user.id,complaint.id,'Community feedback',complaint.status,complaint.status,`${rating}/5 · ${resolution}${comment ? ` · ${comment}` : ''}`);
+        if (resolution === 'Yes') {
+          run('UPDATE cycles SET closed_at=CURRENT_TIMESTAMP WHERE id=?', [cycle.id]);
+          run('UPDATE complaints SET closed_at=CURRENT_TIMESTAMP WHERE id=?', [complaint.id]);
+          changeStatus(complaint,user,'Citizen confirmed resolution','Closed','Reporter confirmed the completed work.');
+        }
         return true;
       });
     },
     manage(user, payload) {
       requireRole(user, ['superadmin']);
+      if (payload.type === 'resolutionTime') {
+        const categoryId = Number(payload.categoryId), hours = Number(payload.hours);
+        demand(Number.isInteger(hours) && hours >= 1 && hours <= 720, 'Choose a closure target from 1 to 720 hours.');
+        demand(one('SELECT id FROM categories WHERE id=?', [categoryId]), 'Choose a valid category.');
+        return transact(() => {
+          run('UPDATE categories SET resolution_hours=? WHERE id=?', [hours,categoryId]);
+          run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Updated closure target','category',categoryId,`${hours} hours; applies to new reports`]);
+          return true;
+        });
+      }
       if (payload.type === 'userStatus') {
         const targetId = Number(payload.userId);
         const active = payload.active === true;

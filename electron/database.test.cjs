@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createDatabase, haversineMeters } = require('./database.cjs');
+const initSqlJs = require('sql.js');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -8,6 +9,108 @@ const path = require('node:path');
 const { decryptBackup, restoreNew } = require('../scripts/restore-backup.cjs');
 
 const sample = { title: 'Broken crossing at the corner', description: 'Vehicles are swerving around the damaged crossing.', categoryId: 2, area: 'Dhanmondi', latitude: 23.7469, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' };
+
+test('closure targets and recurring issues keep other reporter details private', async () => {
+  const db = await createDatabase(':memory:');
+  try {
+    const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
+    const firstReporter = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const nextReporter = db.register({ name: 'Second Citizen', email: 'second@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    db.manage(owner, { type: 'resolutionTime', categoryId: 2, hours: 24 });
+    const originalId = db.createComplaint(firstReporter, sample);
+    const first = db.complaintDetail(owner, { id: originalId }).complaint;
+    assert.equal((Date.parse(first.resolution_due_at.replace(' ', 'T') + 'Z') - Date.parse(first.created_at.replace(' ', 'T') + 'Z')) / 3600000, 24);
+    db.manage(owner, { type: 'resolutionTime', categoryId: 2, hours: 48 });
+    assert.equal(db.complaintDetail(owner, { id: originalId }).complaint.resolution_due_at, first.resolution_due_at);
+    db.act(owner, { id: originalId, action: 'verify' });
+    db.act(owner, { id: originalId, action: 'assign', departmentId: 1 });
+    const staff = db.manage(owner, { type: 'user', name: 'Road Worker', email: 'staff@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+    assert.ok(staff);
+    const worker = db.login('staff@example.test', 'staff-password-123');
+    db.act(worker, { id: originalId, action: 'start' });
+    db.act(worker, { id: originalId, action: 'resolve', note: 'Crossing repaired and inspected.' });
+    db.submitFeedback(firstReporter, { id: originalId, rating: 5, resolution: 'Yes', comment: 'Confirmed fixed.' });
+    assert.equal(db.complaintDetail(owner, { id: originalId }).complaint.status, 'Closed');
+    assert.ok(db.complaintDetail(owner, { id: originalId }).complaint.closed_at);
+    const recurringId = db.createComplaint(nextReporter, { ...sample, title: 'Same crossing has broken again', latitude: sample.latitude + 0.0001 });
+    const adminDetail = db.complaintDetail(owner, { id: recurringId });
+    assert.equal(adminDetail.complaint.recurrence_of, originalId);
+    assert.equal(adminDetail.recurrence.code, first.code);
+    assert.equal(db.listComplaints(owner, { scope: 'Recurring issues' }).total, 1);
+    const citizenDetail = db.complaintDetail(nextReporter, { id: recurringId });
+    assert.equal(citizenDetail.complaint.recurrence_flag, true);
+    assert.equal(citizenDetail.complaint.recurrence_of, null);
+    assert.equal(citizenDetail.recurrence, null);
+    assert.throws(() => db.complaintDetail(nextReporter, { id: originalId }), /not found/);
+    assert.throws(() => db.manage(nextReporter, { type: 'resolutionTime', categoryId: 2, hours: 1 }), /permission/);
+    assert.throws(() => db.act(nextReporter, { id: recurringId, action: 'dismissRecurrence', note: 'Different location' }), /permission/);
+    db.act(owner, { id: recurringId, action: 'dismissRecurrence', note: 'Separate damaged curb.' });
+    assert.equal(db.complaintDetail(owner, { id: recurringId }).complaint.recurrence_flag, false);
+    const farId = db.createComplaint(nextReporter, { ...sample, title: 'Another crossing broken farther away', latitude: sample.latitude + 0.003 });
+    assert.equal(db.complaintDetail(owner, { id: farId }).complaint.recurrence_flag, false);
+  } finally { db.close(); }
+});
+
+test('older database receives closure fields without losing a closed report', async () => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'civicpulse-migrate-'));
+  const file = path.join(folder, 'legacy.sqlite');
+  try {
+    const SQL = await initSqlJs({ locateFile: () => require.resolve('sql.js/dist/sql-wasm.wasm') });
+    const old = new SQL.Database();
+    old.run("CREATE TABLE users (id INTEGER PRIMARY KEY,name TEXT NOT NULL,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,area TEXT NOT NULL DEFAULT '',verified_area INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+    old.run('CREATE TABLE departments (id INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE,active INTEGER NOT NULL DEFAULT 1)');
+    old.run('CREATE TABLE categories (id INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE,department_id INTEGER,active INTEGER NOT NULL DEFAULT 1)');
+    old.run("CREATE TABLE complaints (id INTEGER PRIMARY KEY,code TEXT UNIQUE,reporter_id INTEGER NOT NULL,title TEXT NOT NULL,description TEXT NOT NULL,category_id INTEGER NOT NULL,area TEXT NOT NULL,latitude REAL NOT NULL,longitude REAL NOT NULL,severity TEXT NOT NULL,priority TEXT NOT NULL DEFAULT 'Normal',status TEXT NOT NULL DEFAULT 'Submitted',department_id INTEGER,image TEXT,completion_image TEXT,duplicate_of INTEGER,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,resolved_at TEXT)");
+    old.run("CREATE TABLE cycles (id INTEGER PRIMARY KEY,complaint_id INTEGER NOT NULL,number INTEGER NOT NULL,resolved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,reopened_at TEXT,closed_at TEXT,UNIQUE(complaint_id,number))");
+    old.run("INSERT INTO users (id,name,email,password_hash,role,area) VALUES (1,'Owner','owner@example.test','unused:hash','superadmin','Dhaka')");
+    old.run("INSERT INTO departments (id,name) VALUES (1,'Roads')");
+    old.run("INSERT INTO categories (id,name,department_id) VALUES (1,'Potholes',1)");
+    old.run("INSERT INTO complaints (id,code,reporter_id,title,description,category_id,area,latitude,longitude,severity,status,created_at,updated_at) VALUES (1,'C-1001',1,'Old pothole','A pothole existed here.',1,'Dhanmondi',23.7469,90.3754,'High','Closed','2026-01-01 00:00:00','2026-01-02 00:00:00')");
+    old.run("INSERT INTO cycles (complaint_id,number,closed_at) VALUES (1,1,'2026-01-03 00:00:00')");
+    fs.writeFileSync(file, Buffer.from(old.export())); old.close();
+    const migrated = await createDatabase(file);
+    try {
+      const caseRow = migrated.complaintDetail(migrated.userById(1), { id: 1 }).complaint;
+      assert.equal(caseRow.code, 'C-1001');
+      assert.equal(caseRow.closed_at, '2026-01-03 00:00:00');
+      assert.equal(caseRow.resolution_due_at, '2026-01-08 00:00:00');
+      assert.equal(migrated.snapshot(migrated.userById(1)).categories[0].resolution_hours, 168);
+    } finally { migrated.close(); }
+  } finally { fs.rmSync(folder, { recursive: true, force: true }); }
+});
+
+test('overdue closure filters clear on confirmation and return on reopening', async () => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'civicpulse-deadline-'));
+  const file = path.join(folder, 'cases.sqlite');
+  try {
+    const db = await createDatabase(file);
+    const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const reportId = db.createComplaint(citizen, sample);
+    db.close();
+    const SQL = await initSqlJs({ locateFile: () => require.resolve('sql.js/dist/sql-wasm.wasm') });
+    const raw = new SQL.Database(fs.readFileSync(file));
+    raw.run("UPDATE complaints SET resolution_due_at=datetime('now','-1 hour') WHERE id=?", [reportId]);
+    fs.writeFileSync(file, Buffer.from(raw.export())); raw.close();
+    const reopened = await createDatabase(file);
+    try {
+      assert.equal(reopened.summary(owner).counts.overdue_closure, 1);
+      assert.equal(reopened.listComplaints(owner, { scope: 'Overdue closure' }).total, 1);
+      reopened.act(owner, { id: reportId, action: 'verify' });
+      reopened.act(owner, { id: reportId, action: 'assign', departmentId: 1 });
+      reopened.manage(owner, { type: 'user', name: 'Road Worker', email: 'staff@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+      const staff = reopened.login('staff@example.test', 'staff-password-123');
+      reopened.act(staff, { id: reportId, action: 'start' });
+      reopened.act(staff, { id: reportId, action: 'resolve', note: 'The repair has been completed.' });
+      reopened.submitFeedback(citizen, { id: reportId, rating: 5, resolution: 'Yes' });
+      assert.equal(reopened.summary(owner).counts.overdue_closure, 0);
+      assert.equal(reopened.listComplaints(owner, { scope: 'Overdue closure' }).total, 0);
+      reopened.act(owner, { id: reportId, action: 'reopen', note: 'The repair failed on inspection.' });
+      assert.equal(reopened.summary(owner).counts.overdue_closure, 1);
+      assert.equal(reopened.complaintDetail(owner, { id: reportId }).complaint.closed_at, null);
+    } finally { reopened.close(); }
+  } finally { fs.rmSync(folder, { recursive: true, force: true }); }
+});
 
 test('email verification and recovery links are single use', async () => {
   const db = await createDatabase(':memory:');

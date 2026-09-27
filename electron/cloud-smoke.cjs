@@ -36,6 +36,7 @@ const { createWebServer } = require('../server/web.cjs');
     await window.locator('.nav-count').getByText('1').waitFor({ timeout: 25000 });
     await window.locator('.sidebar nav button').filter({ hasText: 'Complaints' }).click();
     await window.getByText('Crossing curb needs repair').waitFor();
+    await window.getByText('Target closure', { exact: false }).first().waitFor();
 
     await window.locator('.sidebar nav button').filter({ hasText: 'Administration' }).click();
     await window.locator('.management-form select').first().selectOption('department');
@@ -43,6 +44,10 @@ const { createWebServer } = require('../server/web.cjs');
     await window.locator('.management-form button').click();
     await window.getByText('Department created. Add a category assigned to it so citizens can choose that service.').waitFor();
     await window.locator('.settings-list strong').getByText('Public Safety Response').waitFor();
+    await window.locator('.target-form select').selectOption('1');
+    await window.locator('.target-form input').fill('24');
+    await window.locator('.target-form button').click();
+    await window.getByText('Closure target saved. It applies to new reports only.').waitFor();
     const browserOwner = await call('login', { email: 'owner@cloud.test', password: 'owner-test-password-123' });
     const snapshot = await call('snapshot', {}, browserOwner.cookie);
     assert.equal(snapshot.data.user.id, owner.id);

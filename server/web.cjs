@@ -21,8 +21,8 @@ function csvCell(value) {
   return `"${text.replaceAll('"', '""')}"`;
 }
 function complaintCsv(complaints) {
-  const rows = [['Code','Title','Category','Area','Severity','Priority','Status','Department','Reported'],
-    ...complaints.map(c => [c.code,c.title,c.category,c.area,c.severity,c.priority,c.status,c.department || '',c.created_at])];
+  const rows = [['Code','Title','Category','Area','Severity','Priority','Status','Department','Reported','Closure target','Closed','Possible recurrence'],
+    ...complaints.map(c => [c.code,c.title,c.category,c.area,c.severity,c.priority,c.status,c.department || '',c.created_at,c.resolution_due_at || '',c.closed_at || '',c.recurring])];
   return '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n');
 }
 function readJson(req) {

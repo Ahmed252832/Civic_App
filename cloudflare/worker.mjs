@@ -84,8 +84,8 @@ export class CivicState {
         const user = await this.sessionUser(request);
         if (!user) return json(401, { ok: false, error: 'Please sign in again.' });
         if (!['admin', 'superadmin'].includes(user.role)) return json(403, { ok: false, error: 'Only administrators can export reports.' });
-        const rows = [['Code','Title','Category','Area','Severity','Priority','Status','Department','Reported'],
-          ...this.store.exportRows(user).map(c => [c.code,c.title,c.category,c.area,c.severity,c.priority,c.status,c.department || '',c.created_at])];
+        const rows = [['Code','Title','Category','Area','Severity','Priority','Status','Department','Reported','Closure target','Closed','Possible recurrence'],
+          ...this.store.exportRows(user).map(c => [c.code,c.title,c.category,c.area,c.severity,c.priority,c.status,c.department || '',c.created_at,c.resolution_due_at || '',c.closed_at || '',c.recurring])];
         return new Response('\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'), { headers: { ...safeHeaders, 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="civicpulse-dhaka-complaints.csv"', 'Cache-Control': 'no-store' } });
       }
       if (request.method !== 'POST' || url.pathname !== '/api/request') return json(404, { ok: false, error: 'Not found.' });

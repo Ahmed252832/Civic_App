@@ -112,8 +112,8 @@ app.whenReady().then(async () => {
         case 'endBackup': result = database.endBackup(actor, payload); break;
         case 'exportCsv': {
           if (!['admin','superadmin'].includes(actor.role)) throw new Error('Only administrators can export reports.');
-          const lines = [['Code','Title','Category','Area','Severity','Priority','Status','Department','Reported'],
-            ...database.exportRows(actor).map(c => [c.code,c.title,c.category,c.area,c.severity,c.priority,c.status,c.department || '',c.created_at])];
+          const lines = [['Code','Title','Category','Area','Severity','Priority','Status','Department','Reported','Closure target','Closed','Possible recurrence'],
+            ...database.exportRows(actor).map(c => [c.code,c.title,c.category,c.area,c.severity,c.priority,c.status,c.department || '',c.created_at,c.resolution_due_at || '',c.closed_at || '',c.recurring])];
           const csvCell = value => {
             let text = String(value ?? '');
             if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
