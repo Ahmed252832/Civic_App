@@ -31,6 +31,7 @@ const { createWebServer } = require('../server/web.cjs');
 
     const citizen = await call('register', { name: 'Cloud Test Citizen', email: 'citizen@cloud.test', area: 'Dhanmondi', password: 'citizen-test-password-123' });
     await call('create', { title: 'Crossing curb needs repair', description: 'The pedestrian crossing curb is broken near the road.', categoryId: 1, area: 'Dhanmondi', latitude: 23.7468, longitude: 90.3754, severity: 'High' }, citizen.cookie);
+    await window.getByRole('button', { name: 'Refresh' }).click();
     await window.locator('.nav-count').getByText('1').waitFor({ timeout: 25000 });
     await window.locator('.sidebar nav button').filter({ hasText: 'Complaints' }).click();
     await window.getByText('Crossing curb needs repair').waitFor();
