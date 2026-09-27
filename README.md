@@ -12,9 +12,9 @@ Every signed-in user can open **Account security** to change their password. Cha
 
 The top-right avatar opens **Account security**. The sidebar sign-out button asks for confirmation for every role. Open browser and desktop sessions show updated shared reports and administration data within about 15 seconds while the app is visible, or when the window regains focus.
 
-Reports stay private to their reporter and administrators until an administrator verifies them. Assigned staff can view the full report after assignment. The public board and other citizens see only verified reports, with approximate map coordinates and no reporter identity, detailed description, or uploaded photos. Rejected and duplicate reports stay off the public board. Administrators can export a case summary as CSV.
+Citizens can see and open only reports they personally submitted, including after those reports are verified or completed. The public issue board is disabled. Administrators and the super administrator can review all reports; assigned department staff can work on their assigned reports. Every signed-in role has a dashboard area search that shows only the **number** of complaints matching an area across all citizens and statuses. It does not return other citizens' report titles, locations, images, or details. Administrators can export a case summary as CSV.
 
-Report lists and the public board now load 25 cases at a time. **Load more** requests the next page by case ID; search and status filters run on the server. The case drawer loads one report's full detail only when opened. Dashboard counts and analytics are calculated in SQL across all cases visible to the signed-in role. The map adds older points as more pages are loaded, and tells users how many points are currently shown. Indexes cover common report and history lookups.
+Report lists load 25 cases at a time. **Load more** requests the next page by case ID; search and status filters run on the server within each role's access. The case drawer loads one report's full detail only when opened. Dashboard counts and analytics are calculated in SQL across all cases visible to the signed-in role. The map adds older points as more pages are loaded, and tells users how many points are currently shown. Indexes cover common report and history lookups.
 
 ## Connected desktop app (version 0.2.0 and later)
 

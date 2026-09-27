@@ -15,7 +15,8 @@ test('web API protects reports and revokes disabled staff sessions', async () =>
   };
   try {
     assert.equal((await call('config')).body.data.setupRequired, true);
-    assert.equal((await call('publicSnapshot')).body.data.complaints.length, 0);
+    assert.equal((await call('publicSnapshot')).response.status, 401);
+    assert.equal((await call('areaSummary')).response.status, 401);
     assert.equal((await call('register', { name: 'First Citizen', email: 'first@example.test', area: 'Dhaka', password: 'citizen-password-123' })).body.ok, false);
     assert.equal((await call('bootstrap', { key: 'wrong', name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' })).body.ok, false);
     const owner = await call('bootstrap', { key: 'test-setup-key', name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
@@ -27,7 +28,7 @@ test('web API protects reports and revokes disabled staff sessions', async () =>
     assert.equal((await call('snapshot')).response.status, 401);
     const created = await call('create', { title: 'Crossing curb is broken', description: 'Residents have to step into traffic to pass this curb.', categoryId: 1, area: 'Dhanmondi', latitude: 23.7468, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' }, citizen.cookie);
     const id = created.body.data;
-    assert.equal((await call('publicSnapshot')).body.data.complaints.length, 0);
+    assert.equal((await call('areaSummary', {}, citizen.cookie)).body.data.total, 1);
     assert.equal((await call('snapshot', {}, neighbor.cookie)).body.data.complaints.length, 0);
     assert.equal((await call('listComplaints', {}, neighbor.cookie)).body.data.complaints.length, 0);
     assert.equal((await call('complaintDetail', { id }, neighbor.cookie)).body.ok, false);
@@ -36,12 +37,18 @@ test('web API protects reports and revokes disabled staff sessions', async () =>
     await call('manage', { type: 'user', name: 'Road Worker', email: 'staff@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 }, owner.cookie);
     const admin = await call('login', { email: 'admin@example.test', password: 'admin-password-123' });
     const staff = await call('login', { email: 'staff@example.test', password: 'staff-password-123' });
+    for (const cookie of [owner.cookie, admin.cookie, staff.cookie, citizen.cookie, neighbor.cookie]) {
+      const area = await call('areaSummary', { query: 'Dhanmondi' }, cookie);
+      assert.equal(area.body.data.total, 1);
+      assert.equal(area.body.data.cityTotal, 1);
+      assert.equal('complaints' in area.body.data, false);
+    }
     assert.equal((await call('action', { id, action: 'verify' }, admin.cookie)).body.ok, true);
-    const publicCase = (await call('publicSnapshot')).body.data.complaints[0];
-    assert.equal(publicCase.description, '');
-    assert.equal('image' in publicCase, false);
-    assert.equal((await call('snapshot', {}, neighbor.cookie)).body.data.complaints[0].image, null);
-    assert.equal((await call('complaintDetail', { id }, neighbor.cookie)).body.data.complaint.image, null);
+    assert.equal((await call('publicSnapshot')).response.status, 401);
+    assert.equal((await call('snapshot', {}, neighbor.cookie)).body.data.complaints.length, 0);
+    assert.equal((await call('complaintDetail', { id }, neighbor.cookie)).response.status, 400);
+    assert.equal((await call('nearby', { latitude: 23.7468, longitude: 90.3754, categoryId: 1 }, neighbor.cookie)).body.data.length, 0);
+    assert.equal((await call('areaSummary', { query: 'Dhan' }, neighbor.cookie)).body.data.total, 1);
     assert.equal((await call('complaintDetail', { id }, citizen.cookie)).body.data.complaint.image, 'data:image/png;base64,AAAA');
     assert.equal((await call('snapshot', {}, staff.cookie)).body.data.complaints[0].image, null);
     assert.equal((await fetch(`${base}/api/export.csv`, { headers: { Cookie: citizen.cookie } })).status, 403);

@@ -7,7 +7,7 @@ import {
 import { onNotice, request } from './api';
 import { downloadEncryptedBackup } from './backup';
 import { IssueMap, LocationPicker } from './MapViews';
-import type { Category, Complaint, ComplaintDetail, Department, Feedback, PageResult, PublicSnapshot, Snapshot, User } from './types';
+import type { AreaSummary, Category, Complaint, ComplaintDetail, Department, Feedback, PageResult, Snapshot, User } from './types';
 
 type Page = 'dashboard' | 'complaints' | 'report' | 'map' | 'feedback' | 'analytics' | 'manage' | 'profile';
 const date = (value: string) => new Date(value.replace(' ', 'T') + (value.includes('Z') ? '' : 'Z')).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -35,7 +35,7 @@ function ComplaintList({ items, onOpen, compact = false }: { items: Complaint[];
     <Badge value={c.status} /><ArrowRight size={16} className="row-arrow" />
   </button>)}</div>;
 }
-function Login({ onLogin, onRegister, onExplore, busy, error }: { onLogin: (email: string, password: string) => Promise<void>; onRegister: (details: { name: string; email: string; area: string; password: string }) => Promise<void>; onExplore: () => void; busy: boolean; error: string }) {
+function Login({ onLogin, onRegister, busy, error }: { onLogin: (email: string, password: string) => Promise<void>; onRegister: (details: { name: string; email: string; area: string; password: string }) => Promise<void>; busy: boolean; error: string }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
@@ -52,7 +52,7 @@ function Login({ onLogin, onRegister, onExplore, busy, error }: { onLogin: (emai
       {registering && <label>Your Dhaka neighborhood<input value={area} onChange={e => setArea(e.target.value)} minLength={2} maxLength={100} placeholder="e.g. Dhanmondi" required /></label>}
       <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} minLength={registering ? 10 : undefined} required /></label>
       {registering && <p className="muted">Email ownership is not verified yet. Use an address you control and avoid entering sensitive details in public report titles.</p>}{error && <div className="error-box">{error}</div>}<button className="primary full" disabled={busy}>{busy ? 'Please wait…' : registering ? 'Create citizen account' : 'Sign in'} <ArrowRight size={17} /></button></form>
-    <div className="login-links"><button type="button" onClick={() => { setRegistering(!registering); setPassword(''); }}>{registering ? 'Already have an account? Sign in' : 'New citizen? Create an account'}</button><button type="button" onClick={onExplore}>Browse public issues</button></div>
+    <div className="login-links"><button type="button" onClick={() => { setRegistering(!registering); setPassword(''); }}>{registering ? 'Already have an account? Sign in' : 'New citizen? Create an account'}</button></div>
     </div></div></div>;
 }
 
@@ -61,34 +61,22 @@ function OwnerSetup({ onSetup, busy, error }: { onSetup: (details: { key: string
   return <div className="setup-screen"><div className="setup-card"><div className="brand"><span className="brand-mark"><MapPin size={20} /></span><span>CivicPulse Dhaka</span></div><span className="eyebrow">FIRST TIME SETUP</span><h1>Set up the Dhaka workspace</h1><p className="muted">The project owner creates the first administrator account. Keep the setup key private.</p><form onSubmit={e => { e.preventDefault(); void onSetup({ key, name, email, password }); }}><label>Setup key<input type="password" value={key} onChange={e => setKey(e.target.value)} required /></label><label>Your name<input value={name} onChange={e => setName(e.target.value)} minLength={3} required /></label><label>Your email<input type="email" value={email} onChange={e => setEmail(e.target.value)} required /></label><label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} minLength={12} required /></label>{error && <div className="error-box">{error}</div>}<button className="primary full" disabled={busy}>{busy ? 'Setting up…' : 'Create owner account'} <ArrowRight size={17} /></button></form></div></div>;
 }
 
-function PublicIssues({ initial, onBack }: { initial: PublicSnapshot; onBack: () => void }) {
-  const [page, setPage] = useState(initial);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+function AreaOverview({ userId }: { userId: number }) {
   const [query, setQuery] = useState('');
-  const queryRef = useRef(query); queryRef.current = query;
-  const [mode, setMode] = useState<'markers' | 'heat'>('markers');
-  const [busy, setBusy] = useState(false);
+  const [summary, setSummary] = useState<AreaSummary | null>(null);
+  const [error, setError] = useState('');
   useEffect(() => {
-    if (!query) { setPage(initial); return; }
-    let cancelled = false;
-    const timer = setTimeout(() => { void request<PublicSnapshot>('publicSnapshot', { query }).then(result => { if (!cancelled) setPage(result); }).catch(() => {}); }, 250);
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [query, initial]);
-  const loadMore = async () => {
-    if (!page.nextCursor || busy) return;
-    setBusy(true);
-    try { const more = await request<PublicSnapshot>('publicSnapshot', { query, cursor: page.nextCursor }); if (queryRef.current === query) setPage(current => ({ ...current, complaints: [...current.complaints, ...more.complaints], nextCursor: more.nextCursor, total: more.total })); }
-    finally { setBusy(false); }
-  };
-  const selected = page.complaints.find(c => c.id === selectedId);
-  return <div className="public-page"><header className="public-header"><div className="brand"><span className="brand-mark"><MapPin size={20} /></span><span>CivicPulse Dhaka</span></div><button className="secondary" onClick={onBack}>Sign in or report <ArrowRight size={16} /></button></header><main className="public-content">
-    <div className="public-hero"><span className="eyebrow">DHAKA CITY ISSUE BOARD</span><h1>See what is happening in Dhaka.</h1><p>Browse Dhaka city reports, their locations, and the progress made so far.</p><p className="public-disclaimer">Independent project prototype. Reports are not automatically sent to DNCC or DSCC.</p><div className="public-stats"><span><strong>{page.total}</strong> matching reports</span><span><strong>{page.complaints.length}</strong> currently loaded</span></div></div>
-    <div className="public-toolbar"><div className="search-box"><Search size={18} /><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search issue, category, or Dhaka area" aria-label="Search public issues" /></div><div className="segmented"><button className={mode === 'markers' ? 'active' : ''} onClick={() => setMode('markers')}>Pins</button><button className={mode === 'heat' ? 'active' : ''} onClick={() => setMode('heat')}>Density</button></div></div>
-    <IssueMap complaints={page.complaints} mode={mode} onOpen={setSelectedId} /><p className="method-note">Map shows the reports loaded below. Load more to see older reports.</p>
-    <div className="public-cards">{page.complaints.map(c => <button className="public-card" key={c.id} onClick={() => setSelectedId(c.id)}><span className="eyebrow">{c.code} · {c.category}</span><h3>{c.title}</h3><div><span><MapPin size={14} /> {c.area}</span><Badge value={c.status} /></div></button>)}</div>
-    {!page.complaints.length && <Empty title="No matching reports" text="Try another Dhaka area or issue type." />}
-    {page.nextCursor && <button className="secondary load-more" onClick={() => void loadMore()} disabled={busy}>{busy ? 'Loading…' : `Load more (${page.complaints.length} of ${page.total})`}</button>}
-  </main>{selected && <div className="drawer-backdrop" onClick={() => setSelectedId(null)}><aside className="detail-drawer" onClick={e => e.stopPropagation()}><div className="drawer-top"><div><span className="eyebrow">{selected.code}</span><h2>{selected.title}</h2></div><button className="icon-button" onClick={() => setSelectedId(null)} aria-label="Close details"><X size={20} /></button></div><div className="drawer-body"><div className="detail-grid"><div><small>STATUS</small><strong>{selected.status}</strong></div><div><small>AREA</small><strong>{selected.area}</strong></div><div><small>CATEGORY</small><strong>{selected.category}</strong></div><div><small>DEPARTMENT</small><strong>{selected.department || 'Unassigned'}</strong></div><div><small>REPORTED</small><strong>{date(selected.created_at)}</strong></div></div><p className="muted">Sign in to report an issue or review completed work.</p><button className="primary" onClick={onBack}>Sign in <ArrowRight size={16} /></button></div></aside></div>}</div>;
+    let active = true;
+    const load = () => {
+      if (document.visibilityState !== 'visible') return;
+      void request<AreaSummary>('areaSummary', { query }).then(result => { if (active) { setSummary(result); setError(''); } }).catch(() => { if (active) setError('Area totals could not be loaded.'); });
+    };
+    const initial = window.setTimeout(load, query ? 250 : 0);
+    const timer = window.setInterval(load, 15000);
+    window.addEventListener('focus', load);
+    return () => { active = false; window.clearTimeout(initial); window.clearInterval(timer); window.removeEventListener('focus', load); };
+  }, [query, userId]);
+  return <section className="card area-overview"><SectionHeading eyebrow="ALL DHAKA REPORTS" title="Complaints by area" right={<span className="count-pill">{summary?.cityTotal ?? '—'} citywide</span>} /><p className="muted">Search an area to see its total across all citizens and statuses. Individual reports are not shown here.</p><div className="search-box"><Search size={18} /><input aria-label="Search an area" placeholder="Search a Dhaka area, e.g. Dhanmondi" value={query} onChange={event => setQuery(event.target.value)} maxLength={80} /></div>{error && <p role="status">{error}</p>}<div className="area-grid"><div className="area-total"><span>{query ? `Matching “${query}”` : 'All Dhaka areas'}</span><strong>{summary?.total ?? '—'}</strong></div></div>{summary && query && summary.total === 0 && <p className="muted">No complaints found for this area.</p>}</section>;
 }
 
 function Dashboard({ data, onPage, onOpen }: { data: Snapshot; onPage: (page: Page) => void; onOpen: (id: number) => void }) {
@@ -106,7 +94,7 @@ function Dashboard({ data, onPage, onOpen }: { data: Snapshot; onPage: (page: Pa
   const highlights = user.role === 'citizen' ? [
     ['My reports', summary.own.total, <FileText size={20} />, 'mint'], ['Open issues', summary.own.open || 0, <Activity size={20} />, 'amber'],
     ['Resolved', summary.own.resolved || 0, <Check size={20} />, 'blue'],
-    ['Visible reports', summary.counts.total, <MapPin size={20} />, 'violet']
+    ['Awaiting review', summary.counts.pending || 0, <MapPin size={20} />, 'violet']
   ] as const : [
     ['Total reports', user.role === 'staff' ? summary.assigned?.total || 0 : summary.counts.total, <FileText size={20} />, 'mint'],
     ['Open issues', user.role === 'staff' ? summary.assigned?.open || 0 : summary.counts.open || 0, <Activity size={20} />, 'amber'],
@@ -114,8 +102,9 @@ function Dashboard({ data, onPage, onOpen }: { data: Snapshot; onPage: (page: Pa
     ['Critical alerts', summary.counts.critical || 0, <Flag size={20} />, 'rose']
   ] as const;
   const categoryCounts = summary.categories.map(row => ({ name: data.categories.find(cat => cat.id === row.id)?.name || 'Other', count: row.count })).slice(0, 5);
-  return <><div className="hero"><div><span className="eyebrow"><Sparkles size={14} /> DHAKA OPERATIONS, IN ONE PLACE</span><h1>Good {new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'}, {user.name.split(' ')[0]}.</h1><p>{user.role === 'citizen' ? 'See what is happening around you, and follow every report through to a real result.' : user.role === 'staff' ? 'Stay on top of assigned work and keep residents informed.' : 'Your Dhaka overview is ready. Review new reports and keep work moving.'}</p><div className="hero-actions"><button className="primary" onClick={() => onPage(user.role === 'citizen' ? 'report' : 'complaints')}>{user.role === 'citizen' ? <Plus size={18} /> : <ClipboardCheck size={18} />}{user.role === 'citizen' ? 'Report an issue' : 'Review complaints'}</button><button className="secondary" onClick={() => onPage('map')}><MapIcon size={18} /> Explore map</button></div></div><div className="hero-visual"><div className="visual-grid" /><span className="pulse-dot dot-one" /><span className="pulse-dot dot-two" /><span className="pulse-dot dot-three" /><div className="visual-label"><Activity size={17} /> Live Dhaka signal</div></div></div>
+  return <><div className="hero"><div><span className="eyebrow"><Sparkles size={14} /> DHAKA OPERATIONS, IN ONE PLACE</span><h1>Good {new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'}, {user.name.split(' ')[0]}.</h1><p>{user.role === 'citizen' ? 'Follow your own reports from submission through resolution.' : user.role === 'staff' ? 'Stay on top of assigned work and keep residents informed.' : 'Your Dhaka overview is ready. Review new reports and keep work moving.'}</p><div className="hero-actions"><button className="primary" onClick={() => onPage(user.role === 'citizen' ? 'report' : 'complaints')}>{user.role === 'citizen' ? <Plus size={18} /> : <ClipboardCheck size={18} />}{user.role === 'citizen' ? 'Report an issue' : 'Review complaints'}</button><button className="secondary" onClick={() => onPage('map')}><MapIcon size={18} /> {user.role === 'citizen' ? 'My report map' : 'Explore map'}</button></div></div><div className="hero-visual"><div className="visual-grid" /><span className="pulse-dot dot-one" /><span className="pulse-dot dot-two" /><span className="pulse-dot dot-three" /><div className="visual-label"><Activity size={17} /> Live Dhaka signal</div></div></div>
   <div className="stat-grid">{highlights.map(([label,value,icon,tone]) => <StatCard key={label} label={label} value={value} icon={icon} tone={tone} />)}</div>
+  <AreaOverview userId={user.id} />
   <div className="two-col"><div className="card"><SectionHeading eyebrow="RECENT ACTIVITY" title={user.role === 'citizen' ? 'Your reports' : 'Latest complaints'} right={<button className="text-button" onClick={() => onPage('complaints')}>View all <ArrowRight size={15} /></button>} /><ComplaintList items={recent} onOpen={onOpen} compact /></div>
   <div className="card"><SectionHeading eyebrow="DHAKA SNAPSHOT" title="Issues by category" right={<button className="text-button" onClick={() => onPage('analytics')}>Explore <ArrowRight size={15} /></button>} /><div className="bar-list">{categoryCounts.map((item,i) => <div className="bar-row" key={item.name}><span>{item.name}</span><div className="bar-track"><i style={{ width: `${Math.max(8,item.count/Math.max(1,categoryCounts[0].count)*100)}%`, background: ['#66dbc3','#82b7ff','#ffc883','#bca5ff','#ff9e9d'][i] }} /></div><strong>{item.count}</strong></div>)}</div><div className="insight-note"><MapPin size={17} /> {summary.counts.total} reports visible to your role.</div></div></div></>;
 }
@@ -125,7 +114,7 @@ function Complaints({ data, onOpen }: { data: Snapshot; onOpen: (id: number) => 
   const filterKey = `${query}\u0000${status}\u0000${scope}`; const filterRef = useRef(filterKey); filterRef.current = filterKey;
   const [page, setPage] = useState({ complaints: data.complaints, nextCursor: data.nextCursor, total: data.summary.counts.total });
   const [busy, setBusy] = useState(false);
-  const scopes = data.user.role === 'citizen' ? ['All issues','My reports','My area'] : data.user.role === 'staff' ? ['Assigned to my department','All issues'] : ['All issues','Needs verification','Awaiting feedback'];
+  const scopes = data.user.role === 'citizen' ? ['My reports'] : data.user.role === 'staff' ? ['Assigned to my department','All issues'] : ['All issues','Needs verification','Awaiting feedback'];
   useEffect(() => setScope(scopes[0]), [data.user.role]);
   useEffect(() => {
     let cancelled = false;
@@ -283,7 +272,7 @@ function Detail({ data, complaint, onClose, refresh, showError }: { data: Snapsh
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null); const [data, setData] = useState<Snapshot | null>(null);
-  const [setupRequired, setSetupRequired] = useState(false); const [exploring, setExploring] = useState(false); const [publicData, setPublicData] = useState<PublicSnapshot | null>(null);
+  const [setupRequired, setSetupRequired] = useState(false);
   const [page, setPage] = useState<Page>('dashboard'); const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<ComplaintDetail | null>(null);
   const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [busy, setBusy] = useState(false); const [loading, setLoading] = useState(true);
@@ -306,9 +295,8 @@ export default function App() {
   useEffect(() => onNotice(message => { setNotice(message); setTimeout(() => setNotice(''), 4500); }), []);
   useEffect(() => { window.scrollTo(0, 0); }, [page, user?.id]);
   const login = async (email: string, password: string) => { setBusy(true); setError(''); try { const account = await request<User>('login', { email, password }); setUser(account); setPage('dashboard'); setSelectedId(null); await refresh(); } catch (err) { setError(String(err instanceof Error ? err.message : err)); } finally { setBusy(false); } };
-  const register = async (details: { name: string; email: string; area: string; password: string }) => { setBusy(true); setError(''); try { const account = await request<User>('register', details); setUser(account); setPage('dashboard'); setExploring(false); await refresh(); } catch (err) { setError(String(err instanceof Error ? err.message : err)); } finally { setBusy(false); } };
+  const register = async (details: { name: string; email: string; area: string; password: string }) => { setBusy(true); setError(''); try { const account = await request<User>('register', details); setUser(account); setPage('dashboard'); await refresh(); } catch (err) { setError(String(err instanceof Error ? err.message : err)); } finally { setBusy(false); } };
   const setup = async (details: { key: string; name: string; email: string; password: string }) => { setBusy(true); setError(''); try { const account = await request<User>('bootstrap', details); setUser(account); setSetupRequired(false); await refresh(); } catch (err) { setError(String(err instanceof Error ? err.message : err)); } finally { setBusy(false); } };
-  const explore = async () => { setBusy(true); setError(''); try { setPublicData(await request<PublicSnapshot>('publicSnapshot')); setExploring(true); } catch (err) { setError(String(err instanceof Error ? err.message : err)); } finally { setBusy(false); } };
   const logout = async () => { setSignOutBusy(true); try { await request('logout'); setSignOutOpen(false); setUser(null); setData(null); setPage('dashboard'); setSelectedId(null); setDetail(null); setError(''); } catch (err) { showError(String(err instanceof Error ? err.message : err)); } finally { setSignOutBusy(false); } };
   const showError = (message: string) => { setError(message); setTimeout(() => setError(''), 7000); };
   const open = (id: number) => { setSelectedId(id); setDetail(null); void request<ComplaintDetail>('complaintDetail', { id }).then(setDetail).catch(err => showError(String(err))); };
@@ -324,7 +312,7 @@ export default function App() {
   }, [user?.role]);
   if (loading) return <div className="loading-screen"><div className="loading-logo"><Activity size={35} /></div><span>Loading CivicPulse…</span></div>;
   if (setupRequired) return <OwnerSetup onSetup={setup} busy={busy} error={error} />;
-  if (!user || !data) return exploring && publicData ? <PublicIssues initial={publicData} onBack={() => setExploring(false)} /> : <Login onLogin={login} onRegister={register} onExplore={() => void explore()} busy={busy} error={error} />;
+  if (!user || !data) return <Login onLogin={login} onRegister={register} busy={busy} error={error} />;
   return <div className="shell"><aside className="sidebar"><div className="brand"><span className="brand-mark"><MapPin size={20} /></span><span>CivicPulse</span></div><div className="workspace-label">WORKSPACE</div><nav>{nav.map(([key,label,icon]) => <button key={key} className={page === key ? 'active' : ''} onClick={() => { setPage(key); setSelectedId(null); }}>{icon}<span>{label}</span>{key === 'complaints' && (data.summary.counts.pending || 0) > 0 && ['admin','superadmin'].includes(user.role) && <i className="nav-count">{data.summary.counts.pending || 0}</i>}</button>)}</nav><div className="sidebar-bottom"><div className="sidebar-tip"><span><Activity size={17} /> DHAKA SIGNAL</span><strong>{data.summary.counts.open || 0} active reports</strong><small>In the Dhaka service area</small></div><button className="profile-mini" onClick={() => setSignOutOpen(true)} title="Sign out"><span className="profile-avatar">{user.name[0]}</span><span><strong>{user.name}</strong><small>{roleName[user.role]}</small></span><LogOut size={17} /></button></div></aside><div className="main-area"><header className="topbar"><div className="breadcrumb">CivicPulse <span>/</span> <strong>{nav.find(n => n[0] === page)?.[1]}</strong></div><div className="top-actions"><span className="today"><Bell size={17} /> {data.summary.counts.pending || 0} new reports</span><span className="top-date">{new Date().toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'long' })}</span><button type="button" className="top-avatar" aria-label="Account security" title="Account security" onClick={() => { setPage('profile'); setSelectedId(null); }}>{user.name[0]}</button></div></header><main className="content">
     {page === 'dashboard' && <Dashboard data={data} onPage={setPage} onOpen={open} />}
     {page === 'complaints' && <Complaints data={data} onOpen={open} />}

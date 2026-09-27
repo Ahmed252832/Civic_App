@@ -86,7 +86,6 @@ async function createWebServer(options = {}) {
         const method = body.method;
         const payload = body.payload || {};
         if (method === 'config') return sendJson(res, 200, { ok: true, data: { demoMode: false, browserMode: true, setupRequired: database.setupRequired() } });
-        if (method === 'publicSnapshot') return sendJson(res, 200, { ok: true, data: database.publicSnapshot(payload) });
         if (method === 'session') return sendJson(res, 200, { ok: true, data: sessionUser(req) });
         if (method === 'bootstrap') {
           if (!setupKey || payload.key !== setupKey) throw new Error('Invalid setup key.');
@@ -126,9 +125,10 @@ async function createWebServer(options = {}) {
         let result;
         switch (method) {
           case 'snapshot': result = database.snapshot(actor); break;
+          case 'areaSummary': result = database.areaSummary(actor, payload); break;
           case 'listComplaints': result = database.listComplaints(actor, payload); break;
           case 'complaintDetail': result = database.complaintDetail(actor, payload); break;
-          case 'nearby': result = database.nearby(payload); break;
+          case 'nearby': result = database.nearby(actor, payload); break;
           case 'create': result = database.createComplaint(actor, payload); break;
           case 'action': result = database.act(actor, payload); break;
           case 'feedback': result = database.submitFeedback(actor, payload); break;

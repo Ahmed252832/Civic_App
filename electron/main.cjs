@@ -63,7 +63,6 @@ app.whenReady().then(async () => {
   ipcMain.handle('civic:request', async (_event, method, payload = {}) => {
     try {
       if (method === 'config') return { ok: true, data: { demoMode: false, browserMode: false, setupRequired: database.setupRequired() } };
-      if (method === 'publicSnapshot') return { ok: true, data: database.publicSnapshot(payload) };
       if (method === 'bootstrap') {
         if (process.env.CIVICPULSE_SETUP_KEY && payload.key !== process.env.CIVICPULSE_SETUP_KEY) throw new Error('Invalid setup key.');
         const account = database.bootstrapAdmin(payload);
@@ -87,9 +86,10 @@ app.whenReady().then(async () => {
       let result;
       switch (method) {
         case 'snapshot': result = database.snapshot(actor); break;
+        case 'areaSummary': result = database.areaSummary(actor, payload); break;
         case 'listComplaints': result = database.listComplaints(actor, payload); break;
         case 'complaintDetail': result = database.complaintDetail(actor, payload); break;
-        case 'nearby': result = database.nearby(payload); break;
+        case 'nearby': result = database.nearby(actor, payload); break;
         case 'create':
           result = database.createComplaint(actor, payload);
           notify(`Your report C-${1000 + result} was submitted.`);

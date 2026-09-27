@@ -43,6 +43,10 @@ function createStore(adapter, options = {}) {
     department_id INTEGER REFERENCES departments(id), image TEXT, completion_image TEXT,
     duplicate_of INTEGER REFERENCES complaints(id), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, resolved_at TEXT)`);
+  run('CREATE TABLE IF NOT EXISTS area_counts (area_key TEXT PRIMARY KEY, total INTEGER NOT NULL)');
+  if (!one('SELECT area_key FROM area_counts LIMIT 1') && one('SELECT COUNT(*) AS n FROM complaints').n > 0) {
+    run('INSERT INTO area_counts (area_key,total) SELECT lower(trim(area)),COUNT(*) FROM complaints GROUP BY lower(trim(area))');
+  }
   run(`CREATE TABLE IF NOT EXISTS updates (
     id INTEGER PRIMARY KEY, complaint_id INTEGER NOT NULL REFERENCES complaints(id), actor_id INTEGER NOT NULL REFERENCES users(id),
     action TEXT NOT NULL, old_status TEXT, new_status TEXT, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
@@ -87,7 +91,7 @@ function createStore(adapter, options = {}) {
     if (['admin','superadmin'].includes(user.role)) return { sql: '1=1', params: [] };
     const publicCase = "c.status NOT IN ('Submitted','Under Review','Rejected','Duplicate')";
     if (user.role === 'staff') return { sql: `(c.department_id=? OR ${publicCase})`, params: [user.departmentId || -1] };
-    return { sql: `(c.reporter_id=? OR ${publicCase})`, params: [user.id] };
+    return { sql: 'c.reporter_id=?', params: [user.id] };
   };
   const privateCase = (user, row) => ['admin','superadmin'].includes(user.role) || row.reporter_id === user.id || (user.role === 'staff' && row.department_id === user.departmentId);
   const safeCase = (user, row) => privateCase(user, row) ? row : { ...row, reporter_id: null, reporter: 'Resident', description: '', image: null, completion_image: null,
@@ -133,20 +137,12 @@ function createStore(adapter, options = {}) {
         return publicUser(one('SELECT * FROM users WHERE id=?', [id()]));
       });
     },
-    publicSnapshot(payload = {}) {
-      const limit = pageSize(payload.limit), cursor = cursorId(payload.cursor), search = safeText(payload.query, 80);
-      const where = ["c.status NOT IN ('Submitted','Under Review','Rejected','Duplicate')"];
-      const params = [];
-      if (search) { where.push('(c.code LIKE ? OR c.title LIKE ? OR c.area LIKE ? OR k.name LIKE ?)'); params.push(...Array(4).fill(`%${search}%`)); }
-      const total = one(`SELECT COUNT(*) AS n FROM complaints c JOIN categories k ON k.id=c.category_id WHERE ${where.join(' AND ')}`, params).n;
-      if (cursor) { where.push('c.id<?'); params.push(cursor); }
-      const rows = all(`SELECT c.id,c.code,c.title,c.category_id,k.name AS category,c.area,c.latitude,c.longitude,c.severity,c.priority,c.status,c.department_id,d.name AS department,c.created_at,c.updated_at
-        FROM complaints c JOIN categories k ON k.id=c.category_id LEFT JOIN departments d ON d.id=c.department_id
-        WHERE ${where.join(' AND ')} ORDER BY c.id DESC LIMIT ?`, [...params, limit + 1]);
-      const more = rows.length > limit;
-      const complaints = rows.slice(0, limit).map(row => ({ ...row, description: '', latitude: Math.round(row.latitude * 1000) / 1000, longitude: Math.round(row.longitude * 1000) / 1000 }));
-      return { complaints, nextCursor: more ? complaints.at(-1).id : null, total,
-        categories: all('SELECT id,name,department_id,active FROM categories ORDER BY name') };
+    areaSummary(user, payload = {}) {
+      demand(user, 'Please sign in.');
+      const query = safeText(payload.query, 80);
+      const cityTotal = one('SELECT COALESCE(SUM(total),0) AS n FROM area_counts').n;
+      const total = query ? one('SELECT COALESCE(SUM(total),0) AS n FROM area_counts WHERE instr(area_key,lower(?)) > 0', [query]).n : cityTotal;
+      return { total, cityTotal, query };
     },
     login(email, password) {
       demand(typeof email === 'string' && email.length <= 200 && typeof password === 'string' && password.length <= 128, 'Invalid email or password.');
@@ -227,7 +223,7 @@ function createStore(adapter, options = {}) {
       demand(user, 'Please sign in.');
       const complaint = one(`SELECT c.*,k.name AS category,d.name AS department,u.name AS reporter FROM complaints c
         JOIN categories k ON k.id=c.category_id LEFT JOIN departments d ON d.id=c.department_id JOIN users u ON u.id=c.reporter_id WHERE c.id=?`, [Number(payload.id)]);
-      demand(complaint && (privateCase(user, complaint) || !['Submitted','Under Review','Rejected','Duplicate'].includes(complaint.status)), 'Complaint not found.');
+      demand(complaint && (privateCase(user, complaint) || (user.role !== 'citizen' && !['Submitted','Under Review','Rejected','Duplicate'].includes(complaint.status))), 'Complaint not found.');
       const fullAccess = ['admin','superadmin'].includes(user.role), privateAccess = privateCase(user, complaint);
       const updates = privateAccess ? all(`SELECT x.*,u.name AS actor,u.role AS actor_role FROM updates x JOIN users u ON u.id=x.actor_id WHERE x.complaint_id=? ORDER BY x.id DESC`, [complaint.id])
         .filter(row => fullAccess || row.action !== 'Community feedback' || row.actor_id === user.id)
@@ -296,10 +292,12 @@ function createStore(adapter, options = {}) {
         audit: user.role === 'superadmin' ? all(`SELECT a.*,u.name AS actor FROM audit a JOIN users u ON u.id=a.actor_id ORDER BY a.id DESC LIMIT 100`) : []
       };
     },
-    nearby(payload) {
+    nearby(user, payload) {
+      demand(user, 'Please sign in.');
       const lat = Number(payload.latitude), lon = Number(payload.longitude);
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) return [];
-      return all(`SELECT id,code,title,status,category_id,latitude,longitude FROM complaints WHERE category_id=? AND status NOT IN ('Submitted','Under Review','Rejected','Duplicate','Closed')`, [Number(payload.categoryId)])
+      const access = visibility(user);
+      return all(`SELECT c.id,c.code,c.title,c.status,c.category_id,c.latitude,c.longitude FROM complaints c WHERE c.category_id=? AND c.status NOT IN ('Submitted','Under Review','Rejected','Duplicate','Closed') AND ${access.sql}`, [Number(payload.categoryId), ...access.params])
         .map(item => ({ ...item, distance: Math.round(haversineMeters({ latitude: lat, longitude: lon }, item)) }))
         .filter(item => item.distance <= 200).sort((a,b) => a.distance - b.distance).slice(0, 5)
         .map(({ latitude, longitude, ...item }) => item);
@@ -319,6 +317,7 @@ function createStore(adapter, options = {}) {
       return transact(() => {
         run(`INSERT INTO complaints (reporter_id,title,description,category_id,area,latitude,longitude,severity,image)
           VALUES (?,?,?,?,?,?,?,?,?)`, [user.id,title,description,categoryId,area,latitude,longitude,payload.severity,image]);
+        run('INSERT INTO area_counts (area_key,total) VALUES (lower(trim(?)),1) ON CONFLICT(area_key) DO UPDATE SET total=total+1', [area]);
         const complaintId = id();
         run('UPDATE complaints SET code=? WHERE id=?', [`C-${String(1000 + complaintId)}`, complaintId]);
         log(user.id, complaintId, 'Submitted', null, 'Submitted', 'Citizen report received');
@@ -394,6 +393,7 @@ function createStore(adapter, options = {}) {
     submitFeedback(user, payload) {
       requireRole(user, ['citizen']);
       const complaint = findComplaint(payload.id);
+      demand(complaint.reporter_id === user.id, 'You can review only your own report.');
       demand(complaint.status === 'Awaiting Feedback', 'Feedback is open only after completed work.');
       const cycle = one('SELECT * FROM cycles WHERE complaint_id=? ORDER BY number DESC LIMIT 1', [complaint.id]);
       demand(cycle, 'No resolution cycle found.');

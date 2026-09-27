@@ -8,6 +8,7 @@ export type Complaint = {
 };
 export type PublicComplaint = Pick<Complaint, 'id' | 'code' | 'title' | 'description' | 'category_id' | 'category' | 'area' | 'latitude' | 'longitude' | 'severity' | 'priority' | 'status' | 'department_id' | 'department' | 'created_at' | 'updated_at'>;
 export type PageResult<T> = { complaints: T[]; nextCursor: number | null; total: number };
+export type AreaSummary = { total: number; cityTotal: number; query: string };
 export type PublicSnapshot = PageResult<PublicComplaint> & { categories: Category[] };
 export type Category = { id: number; name: string; department_id: number | null; active: number };
 export type Department = { id: number; name: string; active: number };

@@ -14,7 +14,7 @@ test('clean setup, private reports, department scope and account controls', asyn
   const db = await createDatabase(':memory:');
   try {
     assert.equal(db.setupRequired(), true);
-    assert.equal(db.publicSnapshot().complaints.length, 0);
+    assert.throws(() => db.areaSummary(null), /sign in/);
     const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
     assert.equal(db.setupRequired(), false);
     assert.throws(() => db.bootstrapAdmin({ name: 'Another Owner', email: 'another@example.test', password: 'owner-secret-password' }), /already configured/);
@@ -25,27 +25,26 @@ test('clean setup, private reports, department scope and account controls', asyn
     const staff = db.login('staff@example.test', 'staff-password-123');
     const admin = db.login('admin@example.test', 'admin-password-123');
     const id = db.createComplaint(citizen, sample);
-    assert.equal(db.publicSnapshot().complaints.length, 0);
+    assert.equal(db.areaSummary(owner).total, 1);
+    assert.equal(db.areaSummary(neighbor, { query: 'Dhan' }).total, 1);
     assert.equal(db.snapshot(neighbor).complaints.length, 0);
     assert.equal(db.snapshot(staff).complaints.length, 0);
     assert.equal(db.snapshot(citizen).complaints[0].image, null);
     assert.equal(db.complaintDetail(citizen, { id }).complaint.image, sample.image);
     assert.throws(() => db.act(staff, { id, action: 'verify' }), /permission/);
     db.act(admin, { id, action: 'verify' });
-    const publicCase = db.publicSnapshot().complaints[0];
-    assert.equal(publicCase.description, '');
-    assert.equal(publicCase.latitude, 23.747);
-    const neighborCase = db.snapshot(neighbor).complaints[0];
-    assert.equal(neighborCase.reporter_id, null);
-    assert.equal(neighborCase.image, null);
-    assert.equal(neighborCase.description, '');
+    assert.equal(db.snapshot(neighbor).complaints.length, 0);
+    assert.equal(db.listComplaints(neighbor).total, 0);
+    assert.equal(db.nearby(neighbor, sample).length, 0);
+    assert.throws(() => db.complaintDetail(neighbor, { id }), /not found/);
     assert.equal(db.snapshot(neighbor).updates.length, 0);
     assert.throws(() => db.act(staff, { id, action: 'start' }), /another department/);
     db.act(admin, { id, action: 'assign', departmentId: 1 });
     db.act(staff, { id, action: 'start' });
     db.act(staff, { id, action: 'resolve', note: 'Crossing surface repaired.' });
-    db.submitFeedback(neighbor, { id, rating: 5, resolution: 'Yes', comment: 'My private comment' });
-    assert.equal(db.snapshot(citizen).feedback.find(f => f.user_id === null).comment, '');
+    assert.throws(() => db.submitFeedback(neighbor, { id, rating: 5, resolution: 'Yes' }), /own report/);
+    db.submitFeedback(citizen, { id, rating: 5, resolution: 'Yes', comment: 'Repair confirmed' });
+    assert.equal(db.snapshot(citizen).feedback[0].comment, 'Repair confirmed');
     const staffId = db.snapshot(owner).users.find(u => u.email === 'staff@example.test').id;
     db.manage(owner, { type: 'userStatus', userId: staffId, active: false });
     assert.equal(db.userById(staffId), null);
@@ -78,11 +77,8 @@ test('cursor pages cover all visible reports and search reaches older records', 
     assert.equal(new Set([...first.complaints, ...second.complaints, ...third.complaints].map(c => c.id)).size, 55);
     assert.equal(db.snapshot(citizen).complaints.length, 25);
     assert.equal(db.snapshot(citizen).summary.counts.total, 55);
-    const publicFirst = db.publicSnapshot();
-    const publicSecond = db.publicSnapshot({ cursor: publicFirst.nextCursor });
-    assert.deepEqual([publicFirst.complaints.length, publicSecond.complaints.length], [25, 5]);
-    assert.equal(publicFirst.total, 30);
-    assert.equal(db.publicSnapshot({ query: 'number 1' }).total, 11);
+    assert.equal(db.areaSummary(owner).total, 55);
+    assert.equal(db.areaSummary(citizen, { query: 'Dhanmondi' }).total, 55);
     assert.equal(db.listComplaints(owner, { query: 'number 1' }).total, 11);
     assert.equal(db.listComplaints(owner, { scope: 'Needs verification' }).total, 25);
   } finally { db.close(); }
@@ -123,7 +119,7 @@ test('owner backup requires password, pages complete data, and restores a checke
     const target = path.join(folder, 'restored.sqlite');
     await restoreNew(decryptBackup(bytes, 'test-secret-passphrase'), target);
     const restored = await createDatabase(target);
-    try { assert.equal(restored.listComplaints(owner).total, 7); assert.equal(restored.login('owner@example.test', 'owner-secret-password').role, 'superadmin'); }
+    try { assert.equal(restored.listComplaints(owner).total, 7); assert.equal(restored.areaSummary(owner, { query: 'Dhanmondi' }).total, 7); assert.equal(restored.login('owner@example.test', 'owner-secret-password').role, 'superadmin'); }
     finally { restored.close(); }
     db.endBackup(owner, { token: access.token });
     assert.throws(() => db.backupPage(owner, { token: access.token, table: 'users' }), /expired/);

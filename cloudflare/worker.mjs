@@ -81,7 +81,6 @@ export class CivicState {
       if (raw.length > 4_000_000) return json(413, { ok: false, error: 'Request is too large.' });
       const { method, payload = {} } = JSON.parse(raw);
       if (method === 'config') return json(200, { ok: true, data: { demoMode: false, browserMode: true, setupRequired: this.store.setupRequired() } });
-      if (method === 'publicSnapshot') return json(200, { ok: true, data: this.store.publicSnapshot(payload) });
       if (method === 'session') return json(200, { ok: true, data: await this.sessionUser(request) });
       if (method === 'bootstrap') {
         this.rateLimit(request, 'bootstrap', 10);
@@ -116,9 +115,10 @@ export class CivicState {
       let data;
       switch (method) {
         case 'snapshot': data = this.store.snapshot(user); break;
+        case 'areaSummary': data = this.store.areaSummary(user, payload); break;
         case 'listComplaints': data = this.store.listComplaints(user, payload); break;
         case 'complaintDetail': data = this.store.complaintDetail(user, payload); break;
-        case 'nearby': data = this.store.nearby(payload); break;
+        case 'nearby': data = this.store.nearby(user, payload); break;
         case 'create': this.rateLimit(request, 'complaint', 8); data = this.store.createComplaint(user, payload); break;
         case 'action': data = this.store.act(user, payload); break;
         case 'feedback': this.rateLimit(request, 'feedback', 20); data = this.store.submitFeedback(user, payload); break;
