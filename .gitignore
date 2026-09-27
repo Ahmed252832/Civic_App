@@ -4,6 +4,7 @@ release/
 artifacts/
 *.log
 CivicPulse Setup *.exe
+CivicPulse Portable */
 data/
 .dev.vars
 .env

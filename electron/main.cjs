@@ -62,7 +62,11 @@ app.whenReady().then(async () => {
   database = await createDatabase(path.join(dataDirectory, 'civicpulse.sqlite'));
   ipcMain.handle('civic:request', async (_event, method, payload = {}) => {
     try {
-      if (method === 'config') return { ok: true, data: { demoMode: false, browserMode: false, setupRequired: database.setupRequired() } };
+      if (method === 'config') return { ok: true, data: { demoMode: false, browserMode: false, setupRequired: database.setupRequired(), emailEnabled: false, offsiteBackupEnabled: false } };
+      if (method === 'forgotPassword') throw new Error('Email recovery is not configured. Use a saved recovery code.');
+      if (method === 'recoverWithCode') { database.consumeAccountToken(payload.code, 'recovery', payload.newPassword); currentUserId = null; return { ok: true, data: true }; }
+      if (method === 'verifyEmail') { database.consumeAccountToken(payload.token, 'verify'); return { ok: true, data: true }; }
+      if (method === 'resetPassword') { database.consumeAccountToken(payload.token, 'reset', payload.newPassword); currentUserId = null; return { ok: true, data: true }; }
       if (method === 'bootstrap') {
         if (process.env.CIVICPULSE_SETUP_KEY && payload.key !== process.env.CIVICPULSE_SETUP_KEY) throw new Error('Invalid setup key.');
         const account = database.bootstrapAdmin(payload);
@@ -101,6 +105,8 @@ app.whenReady().then(async () => {
         case 'feedback': result = database.submitFeedback(actor, payload); break;
         case 'manage': result = database.manage(actor, payload); break;
         case 'changePassword': result = database.changePassword(actor, payload); break;
+        case 'issueRecoveryCode': result = database.issueRecoveryCode(actor, payload.password); break;
+        case 'requestVerification': throw new Error('Email verification is available only on the hosted site when a mail provider is configured.');
         case 'beginBackup': result = database.beginBackup(actor, payload); break;
         case 'backupPage': result = database.backupPage(actor, payload); break;
         case 'endBackup': result = database.endBackup(actor, payload); break;
