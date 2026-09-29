@@ -171,6 +171,8 @@ export class CivicState {
       let data;
       switch (method) {
         case 'snapshot': data = this.store.snapshot(user); break;
+        case 'performance': data = this.store.performance(user); break;
+        case 'readNotification': data = this.store.readNotification(user, payload); break;
         case 'areaSummary': data = this.store.areaSummary(user, payload); break;
         case 'listComplaints': data = this.store.listComplaints(user, payload); break;
         case 'complaintDetail': data = this.store.complaintDetail(user, payload); break;

@@ -4,7 +4,8 @@ const crypto = require('node:crypto');
 const initSqlJs = require('sql.js');
 const { createDatabase } = require('../electron/database.cjs');
 
-const TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'audit'];
+const TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'audit'];
+const REQUIRED_TABLES = TABLES.filter(table => table !== 'notifications');
 const MAX_BACKUP_BYTES = 200 * 1024 * 1024;
 
 function decryptBackup(bytes, passphrase) {
@@ -16,7 +17,7 @@ function decryptBackup(bytes, passphrase) {
   decipher.setAuthTag(body.subarray(body.length - 16));
   const decrypted = Buffer.concat([decipher.update(body.subarray(0, body.length - 16)), decipher.final()]);
   const archive = JSON.parse(decrypted.toString('utf8'));
-  if (archive.format !== 'civicpulse-backup-v1' || !archive.tables || TABLES.some(table => !Array.isArray(archive.tables[table]))) throw new Error('Backup contents are incomplete.');
+  if (archive.format !== 'civicpulse-backup-v1' || !archive.tables || REQUIRED_TABLES.some(table => !Array.isArray(archive.tables[table])) || (archive.tables.notifications && !Array.isArray(archive.tables.notifications))) throw new Error('Backup contents are incomplete.');
   return archive;
 }
 function decryptOffsiteBackup(bytes, keyBase64) {
@@ -27,7 +28,7 @@ function decryptOffsiteBackup(bytes, keyBase64) {
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, bytes.subarray(6, 18));
   decipher.setAuthTag(body.subarray(body.length - 16));
   const archive = JSON.parse(Buffer.concat([decipher.update(body.subarray(0, body.length - 16)), decipher.final()]).toString('utf8'));
-  if (archive.format !== 'civicpulse-offsite-v1' || !archive.tables || TABLES.some(table => !Array.isArray(archive.tables[table]))) throw new Error('Offsite backup contents are incomplete.');
+  if (archive.format !== 'civicpulse-offsite-v1' || !archive.tables || REQUIRED_TABLES.some(table => !Array.isArray(archive.tables[table])) || (archive.tables.notifications && !Array.isArray(archive.tables.notifications))) throw new Error('Offsite backup contents are incomplete.');
   return archive;
 }
 
@@ -46,7 +47,7 @@ async function restoreNew(archive, output) {
       db.run('BEGIN TRANSACTION');
       for (const table of TABLES.slice().reverse()) db.run(`DELETE FROM ${table}`);
       for (const table of TABLES) {
-        for (const row of archive.tables[table]) {
+        for (const row of archive.tables[table] || []) {
           const columns = Object.keys(row);
           if (!columns.length || columns.some(column => !/^[a-z_]+$/.test(column))) throw new Error(`Invalid ${table} row.`);
           db.run(`INSERT INTO ${table} (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`, columns.map(column => row[column]));
@@ -90,7 +91,7 @@ async function main() {
   const archive = bytes.subarray(0, 6).toString() === 'CPR2V1'
     ? decryptOffsiteBackup(bytes, process.env.CIVICPULSE_BACKUP_KEY)
     : decryptBackup(bytes, await secretPrompt('Backup passphrase: '));
-  const counts = Object.fromEntries(TABLES.map(table => [table, archive.tables[table].length]));
+  const counts = Object.fromEntries(TABLES.map(table => [table, (archive.tables[table] || []).length]));
   if (output) console.log(`Restored and checked: ${await restoreNew(archive, output)}`);
   else console.log('Backup decrypted and validated. Pass a new SQLite filename to restore.');
   console.log('Records:', counts);

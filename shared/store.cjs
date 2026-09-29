@@ -1,7 +1,7 @@
 const crypto = require('node:crypto');
 const SEVERITIES = ['Low', 'Medium', 'High', 'Critical'];
 const ACTIVE = ['Submitted', 'Under Review', 'Verified', 'Assigned', 'In Progress', 'Reopened'];
-const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'audit'];
+const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'audit'];
 // Operational pilot boundary for Dhaka city; replace with an approved city polygon before municipal use.
 const DHAKA_BOUNDS = { south: 23.68, north: 23.92, west: 90.30, east: 90.53 };
 const inDhaka = (latitude, longitude) => latitude >= DHAKA_BOUNDS.south && latitude <= DHAKA_BOUNDS.north && longitude >= DHAKA_BOUNDS.west && longitude <= DHAKA_BOUNDS.east;
@@ -66,6 +66,9 @@ function createStore(adapter, options = {}) {
     user_id INTEGER NOT NULL REFERENCES users(id), rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
     resolution TEXT NOT NULL, comment TEXT NOT NULL DEFAULT '', local INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(cycle_id, user_id))`);
+  run(`CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), complaint_id INTEGER NOT NULL REFERENCES complaints(id),
+    title TEXT NOT NULL, message TEXT NOT NULL, read_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
   run(`CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY, actor_id INTEGER NOT NULL REFERENCES users(id), action TEXT NOT NULL,
     target_type TEXT NOT NULL, target_id INTEGER NOT NULL, detail TEXT NOT NULL DEFAULT '',
@@ -82,6 +85,7 @@ function createStore(adapter, options = {}) {
   run('CREATE INDEX IF NOT EXISTS complaints_category_resolution ON complaints(category_id,status,resolved_at)');
   run('CREATE INDEX IF NOT EXISTS updates_complaint_id ON updates(complaint_id,id)');
   run('CREATE INDEX IF NOT EXISTS feedback_complaint_id ON feedback(complaint_id,id)');
+  run('CREATE INDEX IF NOT EXISTS notifications_user_id ON notifications(user_id,id)');
   run('CREATE INDEX IF NOT EXISTS cycles_complaint_id ON cycles(complaint_id,id)');
 
   const log = (actor, complaint, action, oldStatus, newStatus, note = '') => {
@@ -280,8 +284,10 @@ function createStore(adapter, options = {}) {
       if (scope === 'Assigned to my department' && user.role === 'staff') { where.push('c.department_id=?'); params.push(user.departmentId || -1); }
       if (scope === 'Needs verification' && ['admin','superadmin'].includes(user.role)) where.push("c.status='Submitted'");
       if (scope === 'Awaiting feedback' && ['admin','superadmin'].includes(user.role)) where.push("c.status='Awaiting Feedback'");
-      if (scope === 'Overdue closure' && ['admin','superadmin'].includes(user.role)) where.push("c.status NOT IN ('Closed','Rejected','Duplicate') AND c.resolution_due_at<CURRENT_TIMESTAMP");
+      if (scope === 'Overdue closure' && ['admin','superadmin'].includes(user.role)) where.push("c.status NOT IN ('Closed','Citizen Verified','Finished','Rejected','Duplicate') AND c.resolution_due_at<CURRENT_TIMESTAMP");
       if (scope === 'Recurring issues' && ['admin','superadmin'].includes(user.role)) where.push('c.recurrence_of IS NOT NULL');
+      if (scope === 'Citizen verified' && ['admin','superadmin'].includes(user.role)) where.push("c.status='Citizen Verified'");
+      if (scope === 'Finished work' && ['admin','superadmin'].includes(user.role)) where.push("c.status='Finished'");
       if (status && status !== 'All statuses') { where.push('c.status=?'); params.push(status); }
       if (search) { where.push('(c.code LIKE ? OR c.title LIKE ? OR c.area LIKE ? OR k.name LIKE ?)'); params.push(...Array(4).fill(`%${search}%`)); }
       const from = 'FROM complaints c JOIN categories k ON k.id=c.category_id LEFT JOIN departments d ON d.id=c.department_id JOIN users u ON u.id=c.reporter_id';
@@ -313,31 +319,60 @@ function createStore(adapter, options = {}) {
       demand(user, 'Please sign in.');
       const access = visibility(user), where = `WHERE ${access.sql}`, params = access.params;
       const counts = one(`SELECT COUNT(*) AS total,
-        SUM(CASE WHEN c.status='Closed' THEN 1 ELSE 0 END) AS closed,
-        SUM(CASE WHEN c.status NOT IN ('Closed','Rejected','Duplicate') THEN 1 ELSE 0 END) AS open,
+        SUM(CASE WHEN c.status IN ('Closed','Finished') THEN 1 ELSE 0 END) AS closed,
+        SUM(CASE WHEN c.status NOT IN ('Closed','Citizen Verified','Finished','Rejected','Duplicate') THEN 1 ELSE 0 END) AS open,
         SUM(CASE WHEN c.status='Submitted' THEN 1 ELSE 0 END) AS pending,
         SUM(CASE WHEN c.status='Awaiting Feedback' THEN 1 ELSE 0 END) AS awaiting,
-        SUM(CASE WHEN c.severity='Critical' AND c.status!='Closed' THEN 1 ELSE 0 END) AS critical,
-        SUM(CASE WHEN c.status NOT IN ('Closed','Rejected','Duplicate') AND c.resolution_due_at<CURRENT_TIMESTAMP THEN 1 ELSE 0 END) AS overdue_closure,
+        SUM(CASE WHEN c.status='Citizen Verified' THEN 1 ELSE 0 END) AS citizen_verified,
+        SUM(CASE WHEN c.status='Finished' THEN 1 ELSE 0 END) AS finished,
+        SUM(CASE WHEN c.severity='Critical' AND c.status NOT IN ('Closed','Citizen Verified','Finished') THEN 1 ELSE 0 END) AS critical,
+        SUM(CASE WHEN c.status NOT IN ('Closed','Citizen Verified','Finished','Rejected','Duplicate') AND c.resolution_due_at<CURRENT_TIMESTAMP THEN 1 ELSE 0 END) AS overdue_closure,
         SUM(CASE WHEN c.recurrence_of IS NOT NULL THEN 1 ELSE 0 END) AS recurring
         FROM complaints c ${where}`, params);
       const categories = all(`SELECT c.category_id AS id,COUNT(*) AS count FROM complaints c ${where} GROUP BY c.category_id ORDER BY count DESC LIMIT 20`, params);
-      const areas = all(`SELECT c.area,COUNT(*) AS count,SUM(CASE WHEN c.status!='Closed' THEN 1 ELSE 0 END) AS open
+      const areas = all(`SELECT c.area,COUNT(*) AS count,SUM(CASE WHEN c.status NOT IN ('Closed','Citizen Verified','Finished') THEN 1 ELSE 0 END) AS open
         FROM complaints c ${where} GROUP BY c.area ORDER BY count DESC LIMIT 20`, params);
       const departments = all(`SELECT c.department_id AS id,COUNT(*) AS count,
-        SUM(CASE WHEN c.status IN ('Closed','Awaiting Feedback') THEN 1 ELSE 0 END) AS resolved
+        SUM(CASE WHEN c.status IN ('Closed','Citizen Verified','Finished','Awaiting Feedback') THEN 1 ELSE 0 END) AS resolved
         FROM complaints c ${where} AND c.department_id IS NOT NULL GROUP BY c.department_id ORDER BY count DESC LIMIT 20`, params);
       const reopened = one(`SELECT COUNT(*) AS n FROM cycles y JOIN complaints c ON c.id=y.complaint_id ${where} AND y.reopened_at IS NOT NULL`, params).n;
       const feedback = one(`SELECT COUNT(*) AS count,AVG(f.rating) AS average FROM feedback f JOIN complaints c ON c.id=f.complaint_id ${where}`, params);
       const own = one(`SELECT COUNT(*) AS total,
-        SUM(CASE WHEN c.status NOT IN ('Closed','Rejected','Duplicate') THEN 1 ELSE 0 END) AS open,
-        SUM(CASE WHEN c.status IN ('Closed','Awaiting Feedback') THEN 1 ELSE 0 END) AS resolved
+        SUM(CASE WHEN c.status NOT IN ('Closed','Citizen Verified','Finished','Rejected','Duplicate') THEN 1 ELSE 0 END) AS open,
+        SUM(CASE WHEN c.status IN ('Closed','Citizen Verified','Finished','Awaiting Feedback') THEN 1 ELSE 0 END) AS resolved
         FROM complaints c WHERE c.reporter_id=?`, [user.id]);
       const assigned = user.role === 'staff' ? one(`SELECT COUNT(*) AS total,
-        SUM(CASE WHEN c.status NOT IN ('Closed','Rejected','Duplicate') THEN 1 ELSE 0 END) AS open,
-        SUM(CASE WHEN c.status IN ('Closed','Awaiting Feedback') THEN 1 ELSE 0 END) AS resolved
+        SUM(CASE WHEN c.status NOT IN ('Closed','Citizen Verified','Finished','Rejected','Duplicate') THEN 1 ELSE 0 END) AS open,
+        SUM(CASE WHEN c.status IN ('Closed','Citizen Verified','Finished','Awaiting Feedback') THEN 1 ELSE 0 END) AS resolved
         FROM complaints c WHERE c.department_id=?`, [user.departmentId || -1]) : null;
       return { counts, categories, areas, departments, reopened, feedback, own, assigned };
+    },
+    performance(user) {
+      requireRole(user, ['superadmin']);
+      const departments = all(`SELECT d.id,d.name,
+        (SELECT COUNT(*) FROM complaints c WHERE c.department_id=d.id AND c.status='Citizen Verified') AS awaiting_finish,
+        COUNT(c.id) AS finished,AVG(f.rating) AS average_rating
+        FROM departments d LEFT JOIN complaints c ON c.department_id=d.id AND c.status IN ('Finished','Closed')
+          AND EXISTS (SELECT 1 FROM feedback f3 JOIN cycles y3 ON y3.id=f3.cycle_id WHERE y3.complaint_id=c.id AND f3.resolution='Yes' AND y3.number=(SELECT MAX(number) FROM cycles WHERE complaint_id=c.id))
+        LEFT JOIN feedback f ON f.id=(SELECT f2.id FROM feedback f2 JOIN cycles y ON y.id=f2.cycle_id WHERE y.complaint_id=c.id ORDER BY y.number DESC LIMIT 1)
+        GROUP BY d.id,d.name ORDER BY d.name`);
+      const areas = all(`SELECT c.department_id,d.name AS department,c.area,COUNT(*) AS finished,AVG(f.rating) AS average_rating
+        FROM complaints c JOIN departments d ON d.id=c.department_id
+        JOIN feedback f ON f.id=(SELECT f2.id FROM feedback f2 JOIN cycles y ON y.id=f2.cycle_id WHERE y.complaint_id=c.id ORDER BY y.number DESC LIMIT 1)
+        WHERE c.status IN ('Finished','Closed') AND f.resolution='Yes'
+        GROUP BY c.department_id,c.area ORDER BY finished DESC,c.area`);
+      return { departments, areas };
+    },
+    readNotification(user, payload) {
+      demand(user, 'Please sign in.');
+      const notificationId = Number(payload.id);
+      demand(Number.isSafeInteger(notificationId) && notificationId > 0, 'Choose a notification.');
+      return transact(() => {
+        const notification = one('SELECT id FROM notifications WHERE id=? AND user_id=?', [notificationId,user.id]);
+        demand(notification, 'Notification not found.');
+        run('UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?', [notificationId,user.id]);
+        return true;
+      });
     },
     exportRows(user) {
       requireRole(user, ['admin','superadmin']);
@@ -354,6 +389,7 @@ function createStore(adapter, options = {}) {
       const ids = [...visibleIds], placeholders = ids.map(() => '?').join(',') || 'NULL';
       return {
         user,
+        notifications: all('SELECT id,complaint_id,title,message,read_at,created_at FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 30', [user.id]),
         complaints,
         nextCursor: page.nextCursor,
         summary: store.summary(user),
@@ -375,7 +411,7 @@ function createStore(adapter, options = {}) {
       const lat = Number(payload.latitude), lon = Number(payload.longitude);
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) return [];
       const access = visibility(user);
-      return all(`SELECT c.id,c.code,c.title,c.status,c.category_id,c.latitude,c.longitude FROM complaints c WHERE c.category_id=? AND c.status NOT IN ('Submitted','Under Review','Rejected','Duplicate','Closed') AND ${access.sql}`, [Number(payload.categoryId), ...access.params])
+      return all(`SELECT c.id,c.code,c.title,c.status,c.category_id,c.latitude,c.longitude FROM complaints c WHERE c.category_id=? AND c.status NOT IN ('Submitted','Under Review','Rejected','Duplicate','Closed','Citizen Verified','Finished') AND ${access.sql}`, [Number(payload.categoryId), ...access.params])
         .map(item => ({ ...item, distance: Math.round(haversineMeters({ latitude: lat, longitude: lon }, item)) }))
         .filter(item => item.distance <= 200).sort((a,b) => a.distance - b.distance).slice(0, 5)
         .map(({ latitude, longitude, ...item }) => item);
@@ -394,7 +430,7 @@ function createStore(adapter, options = {}) {
       const image = payload.image || null;
       demand(!image || (typeof image === 'string' && /^data:image\/(png|jpeg|webp);base64,/.test(image) && image.length < 600000), 'Image is too large after optimization.');
       return transact(() => {
-        const recurrence = all(`SELECT id,latitude,longitude,closed_at FROM complaints WHERE category_id=? AND status='Closed' AND closed_at>=datetime('now','-90 days')
+        const recurrence = all(`SELECT id,latitude,longitude,closed_at FROM complaints WHERE category_id=? AND status IN ('Closed','Finished') AND closed_at>=datetime('now','-90 days')
           AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? ORDER BY closed_at DESC`, [categoryId,latitude-0.001,latitude+0.001,longitude-0.0013,longitude+0.0013])
           .map(row => ({ ...row, distance: haversineMeters({ latitude, longitude }, row) }))
           .filter(row => row.distance <= 100).sort((a,b) => a.distance - b.distance || b.id - a.id)[0];
@@ -409,8 +445,9 @@ function createStore(adapter, options = {}) {
     },
     act(user, payload) {
       const action = safeText(payload.action, 30), note = safeText(payload.note, 1000);
-      demand(['verify','reject','duplicate','assign','close','reopen','priority','start','progress','resolve','dismissRecurrence'].includes(action), 'Unknown action.');
+      demand(['verify','reject','duplicate','assign','finish','reopen','priority','start','progress','resolve','dismissRecurrence'].includes(action), 'Unknown action.');
       if (['start','progress','resolve'].includes(action)) requireRole(user, ['staff']);
+      else if (action === 'finish') requireRole(user, ['superadmin']);
       else requireRole(user, ['admin','superadmin']);
       const complaint = findComplaint(payload.id);
       if (user.role === 'staff') demand(complaint.department_id === user.departmentId, 'This complaint belongs to another department.');
@@ -461,22 +498,23 @@ function createStore(adapter, options = {}) {
           run('INSERT INTO cycles (complaint_id,number) VALUES (?,?)', [complaint.id,next]);
           run('UPDATE complaints SET completion_image=?, resolved_at=CURRENT_TIMESTAMP WHERE id=?', [image,complaint.id]);
           changeStatus(complaint,user,'Work completed','Awaiting Feedback',note);
+          run('INSERT INTO notifications (user_id,complaint_id,title,message) VALUES (?,?,?,?)',
+            [complaint.reporter_id,complaint.id,'Please review completed work',`${complaint.code}: Department staff marked the work complete. Open your report to confirm it and give a rating.`]);
         } else if (action === 'reopen') {
-          demand(['Awaiting Feedback','Closed'].includes(complaint.status), 'Only resolved complaints can be reopened.');
+          demand(['Awaiting Feedback','Citizen Verified','Finished','Closed'].includes(complaint.status), 'Only completed complaints can be reopened.');
+          if (complaint.status === 'Finished') requireRole(user, ['superadmin']);
           demand(note.length >= 5, 'Give a reason for reopening.');
           const cycle = one('SELECT * FROM cycles WHERE complaint_id=? ORDER BY number DESC LIMIT 1', [complaint.id]);
           demand(cycle, 'No resolution cycle found.');
           run('UPDATE cycles SET reopened_at=CURRENT_TIMESTAMP WHERE id=?', [cycle.id]);
           run('UPDATE complaints SET closed_at=NULL WHERE id=?', [complaint.id]);
           changeStatus(complaint,user,'Reopened','Reopened',note);
-        } else if (action === 'close') {
-          demand(complaint.status === 'Awaiting Feedback', 'Only completed work can be closed.');
+        } else if (action === 'finish') {
+          demand(complaint.status === 'Citizen Verified', 'The citizen must confirm the repair before it can be finished.');
           const cycle = one('SELECT * FROM cycles WHERE complaint_id=? ORDER BY number DESC LIMIT 1', [complaint.id]);
           demand(cycle, 'No resolution cycle found.');
-          demand(!one("SELECT id FROM feedback WHERE cycle_id=? AND resolution IN ('No','Partially')", [cycle.id]), 'The reporter disputed this resolution. Reopen the case instead.');
-          run('UPDATE cycles SET closed_at=CURRENT_TIMESTAMP WHERE id=?', [cycle.id]);
-          run('UPDATE complaints SET closed_at=CURRENT_TIMESTAMP WHERE id=?', [complaint.id]);
-          changeStatus(complaint,user,'Closed','Closed',note);
+          demand(one("SELECT id FROM feedback WHERE cycle_id=? AND user_id=? AND resolution='Yes'", [cycle.id,complaint.reporter_id]), 'Citizen confirmation is required.');
+          changeStatus(complaint,user,'Moved to finished work','Finished',note);
         } else throw new Error('Unknown action.');
         return true;
       });
@@ -499,7 +537,7 @@ function createStore(adapter, options = {}) {
         if (resolution === 'Yes') {
           run('UPDATE cycles SET closed_at=CURRENT_TIMESTAMP WHERE id=?', [cycle.id]);
           run('UPDATE complaints SET closed_at=CURRENT_TIMESTAMP WHERE id=?', [complaint.id]);
-          changeStatus(complaint,user,'Citizen confirmed resolution','Closed','Reporter confirmed the completed work.');
+          changeStatus(complaint,user,'Citizen confirmed resolution','Citizen Verified','Reporter confirmed the completed work and rated it. Awaiting super administrator review.');
         }
         return true;
       });

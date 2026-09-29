@@ -138,6 +138,8 @@ async function createWebServer(options = {}) {
         let result;
         switch (method) {
           case 'snapshot': result = database.snapshot(actor); break;
+          case 'performance': result = database.performance(actor); break;
+          case 'readNotification': result = database.readNotification(actor, payload); break;
           case 'areaSummary': result = database.areaSummary(actor, payload); break;
           case 'listComplaints': result = database.listComplaints(actor, payload); break;
           case 'complaintDetail': result = database.complaintDetail(actor, payload); break;
