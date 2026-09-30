@@ -380,23 +380,32 @@ function createStore(adapter, options = {}) {
         JOIN feedback f ON f.id=(SELECT f2.id FROM feedback f2 JOIN cycles y ON y.id=f2.cycle_id WHERE y.complaint_id=c.id ORDER BY y.number DESC LIMIT 1)
         WHERE c.status IN ('Finished','Closed') AND f.resolution='Yes'
         GROUP BY c.department_id,c.area ORDER BY finished DESC,c.area`);
-      const completed = all(`SELECT c.id,c.department_id,c.created_at,c.resolution_due_at,c.closed_at,c.resolved_at,c.finished_at,
-        (SELECT COUNT(*) FROM cycles y WHERE y.complaint_id=c.id AND y.reopened_at IS NOT NULL) AS reopen_count,
-        (SELECT COUNT(*) FROM feedback f JOIN cycles y ON y.id=f.cycle_id WHERE y.complaint_id=c.id AND f.resolution='Yes') AS rating_count
-        FROM complaints c WHERE c.status IN ('Finished','Closed') AND c.department_id IS NOT NULL AND c.closed_at IS NOT NULL`);
+      const completed = all(`SELECT c.id,c.department_id,c.created_at,c.resolution_due_at,c.closed_at
+        FROM complaints c WHERE c.status IN ('Finished','Closed') AND c.department_id IS NOT NULL AND c.closed_at IS NOT NULL
+        AND EXISTS (SELECT 1 FROM feedback f JOIN cycles y ON y.id=f.cycle_id WHERE y.complaint_id=c.id AND f.resolution='Yes' AND y.number=(SELECT MAX(number) FROM cycles WHERE complaint_id=c.id))`);
+      const everConfirmed = all(`SELECT c.id,c.department_id,MAX(CASE WHEN y.reopened_at IS NOT NULL THEN 1 ELSE 0 END) AS reopened
+        FROM complaints c JOIN cycles y ON y.complaint_id=c.id WHERE c.department_id IS NOT NULL AND y.closed_at IS NOT NULL
+        GROUP BY c.id,c.department_id`);
       const byDepartment = new Map();
+      const byConfirmedDepartment = new Map();
       for (const row of completed) {
         if (!byDepartment.has(row.department_id)) byDepartment.set(row.department_id, []);
         byDepartment.get(row.department_id).push(row);
       }
+      for (const row of everConfirmed) {
+        if (!byConfirmedDepartment.has(row.department_id)) byConfirmedDepartment.set(row.department_id, []);
+        byConfirmedDepartment.get(row.department_id).push(row);
+      }
       for (const row of departments) {
         const cases = byDepartment.get(row.id) || [];
+        const confirmedCases = byConfirmedDepartment.get(row.id) || [];
         const durations = cases.map(c => (Date.parse(`${c.closed_at}Z`) - Date.parse(`${c.created_at}Z`)) / 3600000).filter(n => Number.isFinite(n) && n >= 0).sort((a,b) => a-b);
         const middle = Math.floor(durations.length / 2);
         row.median_confirmation_hours = durations.length ? Math.round((durations.length % 2 ? durations[middle] : (durations[middle-1] + durations[middle]) / 2) * 10) / 10 : null;
         row.on_time_percent = cases.length ? Math.round(100 * cases.filter(c => c.resolution_due_at && c.closed_at <= c.resolution_due_at).length / cases.length) : null;
-        row.reopened_percent = cases.length ? Math.round(100 * cases.filter(c => c.reopen_count > 0).length / cases.length) : null;
-        row.rating_count = cases.reduce((sum,c) => sum + c.rating_count, 0);
+        row.reopened_percent = confirmedCases.length ? Math.round(100 * confirmedCases.filter(c => c.reopened).length / confirmedCases.length) : null;
+        row.reopen_sample_count = confirmedCases.length;
+        row.rating_count = cases.length;
         row.sample_count = cases.length;
       }
       return { departments, areas, pendingReopenRequests: all(`SELECT r.id,r.complaint_id,c.code,c.title,r.reason,r.created_at FROM reopen_requests r JOIN complaints c ON c.id=r.complaint_id WHERE r.status='Pending' ORDER BY r.id DESC LIMIT 50`) };

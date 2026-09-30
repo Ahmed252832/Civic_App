@@ -37,6 +37,7 @@ test('repair evidence, citizen rework review and department scorecard', async ()
     db.decideReopen(owner, { requestId, decision: 'Approved', note: 'Return to department for inspection.' });
     assert.equal(db.complaintDetail(owner, { id }).complaint.status, 'Reopened');
     assert.equal(db.performance(owner).pendingReopenRequests.length, 0);
+    assert.equal(db.performance(owner).departments.find(row => row.id === 1).reopened_percent, 100);
     db.act(owner, { id, action: 'assign', departmentId: 1 });
     db.act(staff, { id, action: 'start' });
     db.act(staff, { id, action: 'resolve', note: 'Repaired again after inspection.', image: sample.image });
@@ -44,8 +45,9 @@ test('repair evidence, citizen rework review and department scorecard', async ()
     db.act(owner, { id, action: 'finish' });
     const score = db.performance(owner).departments.find(row => row.id === 1);
     assert.equal(score.finished, 1);
-    assert.equal(score.rating_count, 2);
+    assert.equal(score.rating_count, 1);
     assert.equal(score.reopened_percent, 100);
+    assert.equal(score.reopen_sample_count, 1);
     assert.equal(score.on_time_percent, 100);
     assert.equal(db.complaintDetail(citizen, { id }).cycles.length, 2);
   } finally { db.close(); }
