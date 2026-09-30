@@ -2,12 +2,12 @@ export type Role = 'citizen' | 'staff' | 'admin' | 'superadmin';
 export type User = { id: number; name: string; email: string; role: Role; area: string; departmentId: number | null; verifiedArea: boolean; emailVerified: boolean; mfaEnabled: boolean; active: boolean };
 export type Complaint = {
   id: number; code: string; reporter_id: number | null; reporter: string; title: string; description: string;
-  category_id: number; category: string; area: string; latitude: number; longitude: number;
+  category_id: number; category: string; area: string; place_name: string | null; latitude: number; longitude: number; location_exact: boolean;
   severity: string; priority: string; status: string; department_id: number | null; department: string | null;
   image: string | null; completion_image: string | null; duplicate_of: number | null; recurrence_of: number | null; recurrence_flag: boolean;
   resolution_due_at: string | null; closed_at: string | null; finished_at: string | null; created_at: string; updated_at: string;
 };
-export type PublicComplaint = Pick<Complaint, 'id' | 'code' | 'title' | 'description' | 'category_id' | 'category' | 'area' | 'latitude' | 'longitude' | 'severity' | 'priority' | 'status' | 'department_id' | 'department' | 'created_at' | 'updated_at'>;
+export type PublicComplaint = Pick<Complaint, 'id' | 'code' | 'title' | 'description' | 'category_id' | 'category' | 'area' | 'place_name' | 'latitude' | 'longitude' | 'location_exact' | 'severity' | 'priority' | 'status' | 'department_id' | 'department' | 'created_at' | 'updated_at'>;
 export type PageResult<T> = { complaints: T[]; nextCursor: number | null; total: number };
 export type AreaSummary = { total: number; cityTotal: number; query: string };
 export type PublicSnapshot = PageResult<PublicComplaint> & { categories: Category[] };

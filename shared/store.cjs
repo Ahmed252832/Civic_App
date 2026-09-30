@@ -92,6 +92,7 @@ function createStore(adapter, options = {}) {
   if (!complaintColumns.has('finished_at')) run('ALTER TABLE complaints ADD COLUMN finished_at TEXT');
   if (!complaintColumns.has('escalation_level')) run('ALTER TABLE complaints ADD COLUMN escalation_level INTEGER NOT NULL DEFAULT 0');
   if (!complaintColumns.has('retained_at')) run('ALTER TABLE complaints ADD COLUMN retained_at TEXT');
+  if (!complaintColumns.has('place_name')) run('ALTER TABLE complaints ADD COLUMN place_name TEXT');
   run("UPDATE complaints SET finished_at=updated_at WHERE status='Finished' AND finished_at IS NULL");
   run("UPDATE complaints SET resolution_due_at=(SELECT datetime(complaints.created_at, '+' || COALESCE(k.resolution_hours,168) || ' hours') FROM categories k WHERE k.id=complaints.category_id) WHERE resolution_due_at IS NULL");
   run('CREATE TABLE IF NOT EXISTS area_counts (area_key TEXT PRIMARY KEY, total INTEGER NOT NULL)');
@@ -168,7 +169,7 @@ function createStore(adapter, options = {}) {
     run('UPDATE area_counts SET total=total-1 WHERE area_key=lower(trim(?))', [area]);
     run('DELETE FROM area_counts WHERE area_key=lower(trim(?)) AND total<=0', [area]);
     run("INSERT INTO area_counts (area_key,total) VALUES ('dhaka',1) ON CONFLICT(area_key) DO UPDATE SET total=total+1");
-    run("UPDATE complaints SET title='Archived citizen report',description='Personal case details removed.',area='Dhaka',latitude=round(latitude,2),longitude=round(longitude,2),image=NULL,completion_image=NULL,retained_at=CURRENT_TIMESTAMP WHERE id=?", [complaintId]);
+    run("UPDATE complaints SET title='Archived citizen report',description='Personal case details removed.',area='Dhaka',place_name=NULL,latitude=round(latitude,2),longitude=round(longitude,2),image=NULL,completion_image=NULL,retained_at=CURRENT_TIMESTAMP WHERE id=?", [complaintId]);
     run("UPDATE cycles SET completion_image=NULL,completion_note='' WHERE complaint_id=?", [complaintId]);
     run("UPDATE updates SET note='' WHERE complaint_id=?", [complaintId]);
     run("UPDATE feedback SET comment='',local=0 WHERE complaint_id=?", [complaintId]);
@@ -193,9 +194,10 @@ function createStore(adapter, options = {}) {
   };
   const privateCase = (user, row) => ['admin','superadmin'].includes(user.role) || row.reporter_id === user.id || (user.role === 'staff' && row.department_id === user.departmentId);
   const safeCase = (user, row) => {
-    const visible = privateCase(user, row) ? row : { ...row, reporter_id: null, reporter: 'Resident', description: '', image: null, completion_image: null,
+    const exact = privateCase(user, row) && !row.retained_at;
+    const visible = exact ? row : { ...row, reporter_id: null, reporter: 'Resident', description: '', image: null, completion_image: null, place_name: null,
       latitude: Math.round(row.latitude * 1000) / 1000, longitude: Math.round(row.longitude * 1000) / 1000 };
-    return { ...visible, recurrence_flag: Boolean(row.recurrence_of), recurrence_of: user.role === 'citizen' || !privateCase(user, row) ? null : row.recurrence_of };
+    return { ...visible, location_exact: exact, recurrence_flag: Boolean(row.recurrence_of), recurrence_of: user.role === 'citizen' || !exact ? null : row.recurrence_of };
   };
 
   if (!one('SELECT id FROM categories LIMIT 1')) {
@@ -422,7 +424,7 @@ function createStore(adapter, options = {}) {
       const from = 'FROM complaints c JOIN categories k ON k.id=c.category_id LEFT JOIN departments d ON d.id=c.department_id JOIN users u ON u.id=c.reporter_id';
       const total = one(`SELECT COUNT(*) AS n ${from} WHERE ${where.join(' AND ')}`, params).n;
       if (cursor) { where.push('c.id<?'); params.push(cursor); }
-      const rows = all(`SELECT c.id,c.code,c.reporter_id,c.title,c.description,c.category_id,c.area,c.latitude,c.longitude,c.severity,c.priority,c.status,c.department_id,c.duplicate_of,c.recurrence_of,c.resolution_due_at,c.closed_at,c.created_at,c.updated_at,c.resolved_at,
+      const rows = all(`SELECT c.id,c.code,c.reporter_id,c.title,c.description,c.category_id,c.area,c.place_name,c.latitude,c.longitude,c.severity,c.priority,c.status,c.department_id,c.duplicate_of,c.recurrence_of,c.resolution_due_at,c.closed_at,c.retained_at,c.created_at,c.updated_at,c.resolved_at,
         k.name AS category,d.name AS department,u.name AS reporter ${from} WHERE ${where.join(' AND ')} ORDER BY c.id DESC LIMIT ?`, [...params, limit + 1]);
       const more = rows.length > limit;
       const complaints = rows.slice(0, limit).map(row => safeCase(user, { ...row, image: null, completion_image: null }));
@@ -643,10 +645,11 @@ function createStore(adapter, options = {}) {
     },
     createComplaint(user, payload) {
       requireRole(user, ['citizen']);
-      const title = safeText(payload.title, 120), description = safeText(payload.description, 2000), area = safeText(payload.area, 100);
+      const title = safeText(payload.title, 120), description = safeText(payload.description, 2000), area = safeText(payload.area, 100), placeName = safeText(payload.placeName, 150);
       const latitude = Number(payload.latitude), longitude = Number(payload.longitude), categoryId = Number(payload.categoryId);
       demand(title.length >= 6 && description.length >= 12, 'Enter a title and a useful description.');
       demand(area.length >= 2, 'Enter the area name.');
+      demand(placeName.length >= 3, 'Enter the exact place name or nearby landmark.');
       demand(Number.isFinite(latitude) && latitude >= -90 && latitude <= 90 && Number.isFinite(longitude) && longitude >= -180 && longitude <= 180, 'Select a valid map location.');
       demand(inDhaka(latitude, longitude), 'Choose a location inside the Dhaka city service area.');
       const category = one('SELECT id,resolution_hours FROM categories WHERE id=? AND active=1', [categoryId]);
@@ -659,8 +662,8 @@ function createStore(adapter, options = {}) {
           AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? ORDER BY closed_at DESC`, [categoryId,latitude-0.001,latitude+0.001,longitude-0.0013,longitude+0.0013])
           .map(row => ({ ...row, distance: haversineMeters({ latitude, longitude }, row) }))
           .filter(row => row.distance <= 100).sort((a,b) => a.distance - b.distance || b.id - a.id)[0];
-        run(`INSERT INTO complaints (reporter_id,title,description,category_id,area,latitude,longitude,severity,image,resolution_due_at,recurrence_of)
-          VALUES (?,?,?,?,?,?,?,?,?,datetime('now','+' || ? || ' hours'),?)`, [user.id,title,description,categoryId,area,latitude,longitude,payload.severity,image,category.resolution_hours,recurrence?.id || null]);
+        run(`INSERT INTO complaints (reporter_id,title,description,category_id,area,place_name,latitude,longitude,severity,image,resolution_due_at,recurrence_of)
+          VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now','+' || ? || ' hours'),?)`, [user.id,title,description,categoryId,area,placeName,latitude,longitude,payload.severity,image,category.resolution_hours,recurrence?.id || null]);
         run('INSERT INTO area_counts (area_key,total) VALUES (lower(trim(?)),1) ON CONFLICT(area_key) DO UPDATE SET total=total+1', [area]);
         const complaintId = id();
         run('UPDATE complaints SET code=? WHERE id=?', [`C-${String(1000 + complaintId)}`, complaintId]);

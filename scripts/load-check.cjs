@@ -1,7 +1,7 @@
 const { performance } = require('node:perf_hooks');
 const { createDatabase } = require('../electron/database.cjs');
 
-const sample = { description: 'Synthetic load-check report', categoryId: 2, area: 'Dhanmondi', latitude: 23.7469, longitude: 90.3754, severity: 'Medium' };
+const sample = { description: 'Synthetic load-check report', categoryId: 2, area: 'Dhanmondi', placeName: 'Dhanmondi Lake east gate', latitude: 23.7469, longitude: 90.3754, severity: 'Medium' };
 const percentile = (values, p) => values.slice().sort((a, b) => a - b)[Math.ceil(values.length * p) - 1].toFixed(1);
 
 async function main() {

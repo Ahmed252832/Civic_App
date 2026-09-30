@@ -26,7 +26,7 @@ test('web API protects reports and revokes disabled staff sessions', async () =>
     const neighbor = await call('register', { name: 'Second Citizen', email: 'second@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
     assert.equal((await call('snapshot', {}, citizen.cookie, 'http://evil.invalid')).response.status, 403);
     assert.equal((await call('snapshot')).response.status, 401);
-    const created = await call('create', { title: 'Crossing curb is broken', description: 'Residents have to step into traffic to pass this curb.', categoryId: 1, area: 'Dhanmondi', latitude: 23.7468, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' }, citizen.cookie);
+    const created = await call('create', { title: 'Crossing curb is broken', description: 'Residents have to step into traffic to pass this curb.', categoryId: 1, area: 'Dhanmondi', placeName: 'Dhanmondi Lake east gate', latitude: 23.7468, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' }, citizen.cookie);
     const id = created.body.data;
     assert.equal((await call('areaSummary', {}, citizen.cookie)).body.data.total, 1);
     assert.equal((await call('snapshot', {}, neighbor.cookie)).body.data.complaints.length, 0);

@@ -43,7 +43,7 @@ const { createWebServer } = require('../server/web.cjs');
     await window.getByText('Verified backup from', { exact: false }).waitFor();
 
     const citizen = await call('register', { name: 'Cloud Test Citizen', email: 'citizen@cloud.test', area: 'Dhanmondi', password: 'citizen-test-password-123' });
-    await call('create', { title: 'Crossing curb needs repair', description: 'The pedestrian crossing curb is broken near the road.', categoryId: 1, area: 'Dhanmondi', latitude: 23.7468, longitude: 90.3754, severity: 'High' }, citizen.cookie);
+    await call('create', { title: 'Crossing curb needs repair', description: 'The pedestrian crossing curb is broken near the road.', categoryId: 1, area: 'Dhanmondi', placeName: 'Dhanmondi Lake east gate', latitude: 23.7468, longitude: 90.3754, severity: 'High' }, citizen.cookie);
     await window.getByRole('button', { name: 'Refresh' }).click();
     await window.getByRole('status').filter({ hasText: 'Updated' }).waitFor();
     await window.locator('.nav-count').getByText('1').waitFor({ timeout: 25000 });
@@ -79,7 +79,7 @@ const { createWebServer } = require('../server/web.cjs');
     await window.getByRole('button', { name: 'Stay signed in' }).click();
     await window.locator('.sidebar nav button').filter({ hasText: 'Administration' }).waitFor();
     const neighbor = await call('register', { name: 'Another Resident', email: 'neighbor@cloud.test', area: 'Dhanmondi', password: 'neighbor-test-password-123' });
-    await call('create', { title: 'Different resident report', description: 'This is a separate test report for another resident.', categoryId: 1, area: 'Dhanmondi', latitude: 23.7468, longitude: 90.3754, severity: 'Medium' }, neighbor.cookie);
+    await call('create', { title: 'Different resident report', description: 'This is a separate test report for another resident.', categoryId: 1, area: 'Dhanmondi', placeName: 'Dhanmondi Lake east gate', latitude: 23.7468, longitude: 90.3754, severity: 'Medium' }, neighbor.cookie);
     await window.locator('.profile-mini').click();
     await window.getByRole('dialog', { name: 'Sign out of CivicPulse?' }).getByRole('button', { name: 'Sign out' }).click();
     await window.getByLabel('Email address').fill('citizen@cloud.test');

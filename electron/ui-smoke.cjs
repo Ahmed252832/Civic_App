@@ -37,7 +37,7 @@ const assert = require('node:assert/strict');
       const account = await window.civic.request('register', { name: 'Test Resident', email: 'resident@example.test', area: 'Dhanmondi', password: 'resident-password-123' });
       if (!account.ok) throw new Error(account.error);
       for (let n = 1; n <= 30; n++) {
-        const result = await window.civic.request('create', { title: `Broken crossing number ${n}`, description: 'Pedestrians are stepping into traffic because the crossing is damaged.', categoryId: 1, area: 'Dhanmondi', latitude: 23.7468, longitude: 90.3754, severity: 'Medium' });
+        const result = await window.civic.request('create', { title: `Broken crossing number ${n}`, description: 'Pedestrians are stepping into traffic because the crossing is damaged.', categoryId: 1, area: 'Dhanmondi', placeName: 'Dhanmondi Lake east gate', latitude: 23.7468, longitude: 90.3754, severity: 'Medium' });
         if (!result.ok) throw new Error(result.error);
       }
     });

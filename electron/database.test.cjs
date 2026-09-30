@@ -8,7 +8,33 @@ const os = require('node:os');
 const path = require('node:path');
 const { decryptBackup, restoreNew } = require('../scripts/restore-backup.cjs');
 
-const sample = { title: 'Broken crossing at the corner', description: 'Vehicles are swerving around the damaged crossing.', categoryId: 2, area: 'Dhanmondi', latitude: 23.7469, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' };
+const sample = { title: 'Broken crossing at the corner', description: 'Vehicles are swerving around the damaged crossing.', categoryId: 2, area: 'Dhanmondi', placeName: 'Dhanmondi Lake east gate', latitude: 23.7469, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' };
+
+test('report pins show the named exact place only to the owner and assigned team', async () => {
+  const db = await createDatabase(':memory:');
+  try {
+    const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    db.manage(owner, { type: 'user', name: 'Road Worker', email: 'roads@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+    db.manage(owner, { type: 'user', name: 'Waste Worker', email: 'waste@example.test', password: 'staff-password-123', role: 'staff', departmentId: 2 });
+    const assignedStaff = db.login('roads@example.test', 'staff-password-123');
+    const otherStaff = db.login('waste@example.test', 'staff-password-123');
+    assert.throws(() => db.createComplaint(citizen, { ...sample, placeName: '' }), /exact place name/);
+    const id = db.createComplaint(citizen, sample);
+    assert.equal(db.listComplaints(citizen).complaints[0].place_name, sample.placeName);
+    assert.equal(db.listComplaints(owner).complaints[0].location_exact, true);
+    db.act(owner, { id, action: 'verify' });
+    db.act(owner, { id, action: 'assign', departmentId: 1 });
+    const own = db.listComplaints(assignedStaff).complaints[0];
+    assert.equal(own.place_name, sample.placeName);
+    assert.equal(own.location_exact, true);
+    const publicCase = db.listComplaints(otherStaff).complaints[0];
+    assert.equal(publicCase.place_name, null);
+    assert.equal(publicCase.location_exact, false);
+    assert.equal(publicCase.latitude, 23.747);
+    assert.equal(db.complaintDetail(otherStaff, { id }).complaint.place_name, null);
+  } finally { db.close(); }
+});
 
 const authenticatorCode = (secret, step = Math.floor(Date.now() / 30000)) => {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -60,6 +86,8 @@ test('citizen data removal requires owner review and scrubs report details', asy
     const report = db.complaintDetail(owner, { id: complaintId }).complaint;
     assert.equal(report.title, 'Archived citizen report');
     assert.equal(report.image, null);
+    assert.equal(report.place_name, null);
+    assert.equal(report.location_exact, false);
     assert.equal(report.description.includes('Vehicles'), false);
     assert.equal(db.snapshot(owner).privacyRequests[0].reason, '');
   } finally { db.close(); }
