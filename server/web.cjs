@@ -114,7 +114,7 @@ async function createWebServer(options = {}) {
           return sendJson(res, 200, { ok: true, data: user }, { 'Set-Cookie': `civicpulse_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_SECONDS}` });
         }
         if (method === 'login') {
-          const user = database.login(payload.email, payload.password);
+          const user = database.login(payload.email, payload.password, payload.code);
           const oldToken = cookieValue(req, 'civicpulse_session');
           if (oldToken) sessions.delete(oldToken);
           const token = crypto.randomBytes(32).toString('base64url');
@@ -135,6 +135,22 @@ async function createWebServer(options = {}) {
           return sendJson(res, 200, { ok: true, data: true }, { 'Set-Cookie': `civicpulse_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_SECONDS}` });
         }
         if (method === 'issueRecoveryCode') return sendJson(res, 200, { ok: true, data: database.issueRecoveryCode(actor, payload.password) });
+        if (method === 'beginMfa') return sendJson(res, 200, { ok: true, data: database.beginMfa(actor, payload.password) });
+        if (method === 'confirmMfa' || method === 'disableMfa') {
+          const result = method === 'confirmMfa' ? database.confirmMfa(actor, payload) : database.disableMfa(actor, payload);
+          for (const [token, session] of sessions) if (session.userId === actor.id) sessions.delete(token);
+          const token = crypto.randomBytes(32).toString('base64url');
+          sessions.set(token, { userId: actor.id, expires: Date.now() + SESSION_SECONDS * 1000 });
+          return sendJson(res, 200, { ok: true, data: result }, { 'Set-Cookie': `civicpulse_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_SECONDS}` });
+        }
+        if (method === 'requestPrivacyRemoval') return sendJson(res, 200, { ok: true, data: database.requestPrivacyRemoval(actor, payload) });
+        if (method === 'decidePrivacyRemoval') {
+          const result = database.decidePrivacyRemoval(actor, payload);
+          if (result.approved) for (const [token, session] of sessions) if (session.userId === result.userId) sessions.delete(token);
+          return sendJson(res, 200, { ok: true, data: result });
+        }
+        if (method === 'retentionPreview') return sendJson(res, 200, { ok: true, data: database.retentionPreview(actor, payload) });
+        if (method === 'applyRetention') return sendJson(res, 200, { ok: true, data: database.applyRetention(actor, payload) });
         let result;
         switch (method) {
           case 'snapshot': result = database.snapshot(actor); break;

@@ -1,7 +1,7 @@
 const crypto = require('node:crypto');
 const SEVERITIES = ['Low', 'Medium', 'High', 'Critical'];
 const ACTIVE = ['Submitted', 'Under Review', 'Verified', 'Assigned', 'In Progress', 'Reopened'];
-const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'reopen_requests', 'audit'];
+const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'reopen_requests', 'privacy_requests', 'audit'];
 // Operational pilot boundary for Dhaka city; replace with an approved city polygon before municipal use.
 const DHAKA_BOUNDS = { south: 23.68, north: 23.92, west: 90.30, east: 90.53 };
 const inDhaka = (latitude, longitude) => latitude >= DHAKA_BOUNDS.south && latitude <= DHAKA_BOUNDS.north && longitude >= DHAKA_BOUNDS.west && longitude <= DHAKA_BOUNDS.east;
@@ -22,6 +22,47 @@ const verifyPassword = (password, saved) => {
   const candidate = crypto.scryptSync(password, salt, 64);
   const original = Buffer.from(hash, 'hex');
   return original.length === candidate.length && crypto.timingSafeEqual(original, candidate);
+};
+const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+const base32 = bytes => {
+  let bits = 0, value = 0, output = '';
+  for (const byte of bytes) { value = (value << 8) | byte; bits += 8; while (bits >= 5) { output += BASE32[(value >>> (bits -= 5)) & 31]; } }
+  if (bits) output += BASE32[(value << (5 - bits)) & 31];
+  return output;
+};
+const unbase32 = value => {
+  let bits = 0, number = 0; const output = [];
+  for (const character of value) { const digit = BASE32.indexOf(character); if (digit < 0) throw new Error('Invalid authenticator secret.'); number = (number << 5) | digit; bits += 5; if (bits >= 8) { output.push((number >>> (bits -= 8)) & 255); number &= (1 << bits) - 1; } }
+  return Buffer.from(output);
+};
+const sealMfa = (secret, password) => {
+  const salt = crypto.randomBytes(16), iv = crypto.randomBytes(12);
+  const key = crypto.scryptSync(password, salt, 32);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const body = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
+  return Buffer.concat([salt, iv, cipher.getAuthTag(), body]).toString('base64');
+};
+const openMfa = (sealed, password) => {
+  const bytes = Buffer.from(sealed, 'base64');
+  if (bytes.length < 45) throw new Error('Authenticator setup is invalid.');
+  const key = crypto.scryptSync(password, bytes.subarray(0, 16), 32);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, bytes.subarray(16, 28));
+  decipher.setAuthTag(bytes.subarray(28, 44));
+  return Buffer.concat([decipher.update(bytes.subarray(44)), decipher.final()]).toString('utf8');
+};
+const totpValue = (secret, step) => {
+  const counter = Buffer.alloc(8); counter.writeBigUInt64BE(BigInt(step));
+  const digest = crypto.createHmac('sha1', unbase32(secret)).update(counter).digest();
+  const offset = digest[digest.length - 1] & 15;
+  return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1000000).padStart(6, '0');
+};
+const matchingTotpStep = (secret, code, lastStep = -1) => {
+  if (typeof code !== 'string' || !/^\d{6}$/.test(code)) return null;
+  const current = Math.floor(Date.now() / 30000);
+  for (const step of [current - 1, current, current + 1]) {
+    if (step > lastStep && crypto.timingSafeEqual(Buffer.from(totpValue(secret, step)), Buffer.from(code))) return step;
+  }
+  return null;
 };
 const demand = (condition, message) => { if (!condition) throw new Error(message); };
 const safeText = (value, max = 500) => String(value ?? '').trim().slice(0, max);
@@ -50,6 +91,7 @@ function createStore(adapter, options = {}) {
   if (!complaintColumns.has('recurrence_of')) run('ALTER TABLE complaints ADD COLUMN recurrence_of INTEGER REFERENCES complaints(id)');
   if (!complaintColumns.has('finished_at')) run('ALTER TABLE complaints ADD COLUMN finished_at TEXT');
   if (!complaintColumns.has('escalation_level')) run('ALTER TABLE complaints ADD COLUMN escalation_level INTEGER NOT NULL DEFAULT 0');
+  if (!complaintColumns.has('retained_at')) run('ALTER TABLE complaints ADD COLUMN retained_at TEXT');
   run("UPDATE complaints SET finished_at=updated_at WHERE status='Finished' AND finished_at IS NULL");
   run("UPDATE complaints SET resolution_due_at=(SELECT datetime(complaints.created_at, '+' || COALESCE(k.resolution_hours,168) || ' hours') FROM categories k WHERE k.id=complaints.category_id) WHERE resolution_due_at IS NULL");
   run('CREATE TABLE IF NOT EXISTS area_counts (area_key TEXT PRIMARY KEY, total INTEGER NOT NULL)');
@@ -89,6 +131,16 @@ function createStore(adapter, options = {}) {
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
   run('CREATE TABLE IF NOT EXISTS backup_access (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL)');
   if (!all('PRAGMA table_info(users)').some(column => column.name === 'email_verified')) run('ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0');
+  const userColumns = new Set(all('PRAGMA table_info(users)').map(column => column.name));
+  if (!userColumns.has('mfa_secret')) run('ALTER TABLE users ADD COLUMN mfa_secret TEXT');
+  if (!userColumns.has('mfa_pending')) run('ALTER TABLE users ADD COLUMN mfa_pending TEXT');
+  if (!userColumns.has('mfa_pending_expires')) run('ALTER TABLE users ADD COLUMN mfa_pending_expires INTEGER');
+  if (!userColumns.has('mfa_last_step')) run('ALTER TABLE users ADD COLUMN mfa_last_step INTEGER NOT NULL DEFAULT -1');
+  run(`CREATE TABLE IF NOT EXISTS privacy_requests (
+    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'Pending',
+    reason TEXT NOT NULL DEFAULT '', decision_note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    decided_at TEXT)`);
+  run('CREATE INDEX IF NOT EXISTS privacy_requests_user ON privacy_requests(user_id,id)');
   run('CREATE TABLE IF NOT EXISTS account_tokens (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), purpose TEXT NOT NULL, issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)');
   run('CREATE INDEX IF NOT EXISTS account_tokens_user_purpose ON account_tokens(user_id,purpose)');
   run('CREATE INDEX IF NOT EXISTS complaints_reporter_id ON complaints(reporter_id,id)');
@@ -111,6 +163,19 @@ function createStore(adapter, options = {}) {
   const changeStatus = (complaint, actor, action, status, note = '') => {
     run('UPDATE complaints SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', [status, complaint.id]);
     log(actor.id, complaint.id, action, complaint.status, status, note);
+  };
+  const scrubCase = (complaintId, area) => {
+    run('UPDATE area_counts SET total=total-1 WHERE area_key=lower(trim(?))', [area]);
+    run('DELETE FROM area_counts WHERE area_key=lower(trim(?)) AND total<=0', [area]);
+    run("INSERT INTO area_counts (area_key,total) VALUES ('dhaka',1) ON CONFLICT(area_key) DO UPDATE SET total=total+1");
+    run("UPDATE complaints SET title='Archived citizen report',description='Personal case details removed.',area='Dhaka',latitude=round(latitude,2),longitude=round(longitude,2),image=NULL,completion_image=NULL,retained_at=CURRENT_TIMESTAMP WHERE id=?", [complaintId]);
+    run("UPDATE cycles SET completion_image=NULL,completion_note='' WHERE complaint_id=?", [complaintId]);
+    run("UPDATE updates SET note='' WHERE complaint_id=?", [complaintId]);
+    run("UPDATE feedback SET comment='',local=0 WHERE complaint_id=?", [complaintId]);
+    run("UPDATE reopen_requests SET reason='',decision_note='' WHERE complaint_id=?", [complaintId]);
+    run("UPDATE notifications SET title='Case updated',message='Personal case details removed.' WHERE complaint_id=?", [complaintId]);
+    run("UPDATE escalation_events SET message='Case deadline recorded.' WHERE complaint_id=?", [complaintId]);
+    run("UPDATE audit SET detail='' WHERE target_type='complaint' AND target_id=?", [complaintId]);
   };
   const findComplaint = complaintId => {
     const complaint = one('SELECT * FROM complaints WHERE id=?', [Number(complaintId)]);
@@ -145,7 +210,7 @@ function createStore(adapter, options = {}) {
   }
   persist();
 
-  const publicUser = row => row && ({ id: row.id, name: row.name, email: row.email, role: row.role, area: row.area, departmentId: row.department_id || null, verifiedArea: Boolean(row.verified_area), emailVerified: Boolean(row.email_verified), active: Boolean(row.active) });
+  const publicUser = row => row && ({ id: row.id, name: row.name, email: row.email, role: row.role, area: row.area, departmentId: row.department_id || null, verifiedArea: Boolean(row.verified_area), emailVerified: Boolean(row.email_verified), mfaEnabled: Boolean(row.mfa_secret), active: Boolean(row.active) });
   const store = {
     setupRequired() { return !one("SELECT id FROM users WHERE role='superadmin' LIMIT 1"); },
     bootstrapAdmin(payload) {
@@ -180,11 +245,21 @@ function createStore(adapter, options = {}) {
       const total = query ? one('SELECT COALESCE(SUM(total),0) AS n FROM area_counts WHERE instr(area_key,lower(?)) > 0', [query]).n : cityTotal;
       return { total, cityTotal, query };
     },
-    login(email, password) {
+    login(email, password, code) {
       demand(typeof email === 'string' && email.length <= 200 && typeof password === 'string' && password.length <= 128, 'Invalid email or password.');
       const user = one('SELECT * FROM users WHERE lower(email)=lower(?) AND active=1', [safeText(email, 200)]);
       demand(user && verifyPassword(String(password || ''), user.password_hash), 'Invalid email or password.');
-      return publicUser(user);
+      if (!user.mfa_secret) return publicUser(user);
+      demand(code, 'Authenticator code required.');
+      let secret;
+      try { secret = openMfa(user.mfa_secret, password); } catch { throw new Error('Invalid email or password.'); }
+      return transact(() => {
+        const current = one('SELECT mfa_last_step FROM users WHERE id=?', [user.id]);
+        const step = matchingTotpStep(secret, code, Number(current.mfa_last_step ?? -1));
+        demand(step !== null, 'Invalid authenticator code.');
+        run('UPDATE users SET mfa_last_step=? WHERE id=?', [step, user.id]);
+        return publicUser(user);
+      });
     },
     userById(userId) { return publicUser(one('SELECT * FROM users WHERE id=? AND active=1', [userId])); },
     findActiveEmail(email) {
@@ -218,7 +293,7 @@ function createStore(adapter, options = {}) {
         demand(row, 'Invalid or expired link.');
         if (purpose === 'verify') run('UPDATE users SET email_verified=1 WHERE id=?', [row.user_id]);
         else {
-          run('UPDATE users SET password_hash=? WHERE id=?', [hashPassword(newPassword),row.user_id]);
+          run('UPDATE users SET password_hash=?,mfa_secret=NULL,mfa_pending=NULL,mfa_pending_expires=NULL,mfa_last_step=-1 WHERE id=?', [hashPassword(newPassword),row.user_id]);
           if (purpose === 'reset') run("DELETE FROM account_tokens WHERE user_id=? AND purpose='recovery'", [row.user_id]);
         }
         run('DELETE FROM account_tokens WHERE user_id=? AND purpose=?', [row.user_id,purpose]);
@@ -244,13 +319,51 @@ function createStore(adapter, options = {}) {
       const current = String(payload.currentPassword || '');
       const next = String(payload.newPassword || '');
       demand(current.length <= 128 && next.length >= 12 && next.length <= 128, 'Use a new password of 12 to 128 characters.');
-      const saved = one('SELECT password_hash FROM users WHERE id=? AND active=1', [user.id]);
+      const saved = one('SELECT password_hash,mfa_secret FROM users WHERE id=? AND active=1', [user.id]);
       demand(saved && verifyPassword(current, saved.password_hash), 'Current password is incorrect.');
       demand(current !== next, 'Choose a different password.');
       return transact(() => {
-        run('UPDATE users SET password_hash=? WHERE id=?', [hashPassword(next), user.id]);
+        const rewrapped = saved.mfa_secret ? sealMfa(openMfa(saved.mfa_secret, current), next) : null;
+        run('UPDATE users SET password_hash=?,mfa_secret=?,mfa_pending=NULL,mfa_pending_expires=NULL WHERE id=?', [hashPassword(next),rewrapped,user.id]);
         run("DELETE FROM account_tokens WHERE user_id=? AND purpose='recovery'", [user.id]);
         run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Changed password','user',user.id,'']);
+        return true;
+      });
+    },
+    beginMfa(user, password) {
+      requireRole(user, ['admin','superadmin']);
+      const saved = one('SELECT password_hash,mfa_secret,email FROM users WHERE id=? AND active=1', [user.id]);
+      demand(saved && typeof password === 'string' && password.length <= 128 && verifyPassword(password, saved.password_hash), 'Current password is incorrect.');
+      demand(!saved.mfa_secret, 'Authenticator sign-in is already enabled.');
+      const secret = base32(crypto.randomBytes(20));
+      transact(() => run('UPDATE users SET mfa_pending=?,mfa_pending_expires=? WHERE id=?', [sealMfa(secret, password),Date.now() + 10 * 60_000,user.id]));
+      return { secret, uri: `otpauth://totp/${encodeURIComponent(`CivicPulse:${saved.email}`)}?secret=${secret}&issuer=CivicPulse&algorithm=SHA1&digits=6&period=30` };
+    },
+    confirmMfa(user, payload) {
+      requireRole(user, ['admin','superadmin']);
+      return transact(() => {
+        const saved = one('SELECT password_hash,mfa_secret,mfa_pending,mfa_pending_expires FROM users WHERE id=? AND active=1', [user.id]);
+        demand(saved && !saved.mfa_secret && saved.mfa_pending && saved.mfa_pending_expires > Date.now(), 'Authenticator setup expired. Start again.');
+        demand(typeof payload.password === 'string' && payload.password.length <= 128 && verifyPassword(payload.password, saved.password_hash), 'Current password is incorrect.');
+        let secret;
+        try { secret = openMfa(saved.mfa_pending, payload.password); } catch { throw new Error('Current password is incorrect.'); }
+        demand(matchingTotpStep(secret, payload.code) !== null, 'Invalid authenticator code. Check your device clock.');
+        run('UPDATE users SET mfa_secret=mfa_pending,mfa_pending=NULL,mfa_pending_expires=NULL,mfa_last_step=-1 WHERE id=?', [user.id]);
+        run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Enabled authenticator','user',user.id,'']);
+        return true;
+      });
+    },
+    disableMfa(user, payload) {
+      requireRole(user, ['admin','superadmin']);
+      return transact(() => {
+        const saved = one('SELECT password_hash,mfa_secret FROM users WHERE id=? AND active=1', [user.id]);
+        demand(saved && saved.mfa_secret, 'Authenticator sign-in is not enabled.');
+        demand(typeof payload.password === 'string' && payload.password.length <= 128 && verifyPassword(payload.password, saved.password_hash), 'Current password is incorrect.');
+        let secret;
+        try { secret = openMfa(saved.mfa_secret, payload.password); } catch { throw new Error('Current password is incorrect.'); }
+        demand(matchingTotpStep(secret, payload.code) !== null, 'Invalid authenticator code.');
+        run('UPDATE users SET mfa_secret=NULL,mfa_pending=NULL,mfa_pending_expires=NULL,mfa_last_step=-1 WHERE id=?', [user.id]);
+        run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Disabled authenticator','user',user.id,'']);
         return true;
       });
     },
@@ -513,6 +626,8 @@ function createStore(adapter, options = {}) {
           .filter(row => visibleIds.has(row.complaint_id))
           .map(row => fullAccess || row.user_id === user.id ? row : { ...row, user_id: null, author: 'Resident', comment: '' }),
         users: user.role === 'superadmin' ? all("SELECT id,name,email,role,area,department_id,verified_area,active,created_at FROM users WHERE role IN ('superadmin','admin','staff') ORDER BY id DESC") : [],
+        privacyRequest: user.role === 'citizen' ? one('SELECT id,status,created_at,decided_at,decision_note FROM privacy_requests WHERE user_id=? ORDER BY id DESC LIMIT 1', [user.id]) : null,
+        privacyRequests: user.role === 'superadmin' ? all("SELECT p.id,p.user_id,p.status,p.reason,p.created_at,p.decided_at,p.decision_note,u.name,u.email FROM privacy_requests p JOIN users u ON u.id=p.user_id ORDER BY CASE WHEN p.status='Pending' THEN 0 ELSE 1 END,p.id DESC LIMIT 50") : [],
         audit: user.role === 'superadmin' ? all(`SELECT a.*,u.name AS actor FROM audit a JOIN users u ON u.id=a.actor_id ORDER BY a.id DESC LIMIT 100`) : []
       };
     },
@@ -700,6 +815,64 @@ function createStore(adapter, options = {}) {
         const target = id();
         run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Created',type,target,name]);
         return target;
+      });
+    },
+    requestPrivacyRemoval(user, payload) {
+      requireRole(user, ['citizen']);
+      const saved = one('SELECT password_hash FROM users WHERE id=? AND active=1', [user.id]);
+      demand(saved && typeof payload.password === 'string' && payload.password.length <= 128 && verifyPassword(payload.password, saved.password_hash), 'Current password is incorrect.');
+      demand(!one("SELECT id FROM privacy_requests WHERE user_id=? AND status='Pending'", [user.id]), 'A removal request is already pending.');
+      return transact(() => {
+        run('INSERT INTO privacy_requests (user_id,reason) VALUES (?,?)', [user.id,safeText(payload.reason, 500)]);
+        const requestId = id();
+        run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Requested data removal','privacy_request',requestId,'']);
+        return requestId;
+      });
+    },
+    decidePrivacyRemoval(user, payload) {
+      requireRole(user, ['superadmin']);
+      const requestId = Number(payload.requestId);
+      demand(Number.isSafeInteger(requestId) && requestId > 0, 'Choose a valid request.');
+      demand(['Approved','Declined'].includes(payload.decision), 'Choose approve or decline.');
+      const note = safeText(payload.note, 500);
+      if (payload.decision === 'Declined') demand(note.length >= 5, 'Explain why the request was declined.');
+      return transact(() => {
+        const item = one("SELECT p.user_id FROM privacy_requests p JOIN users u ON u.id=p.user_id WHERE p.id=? AND p.status='Pending' AND u.role='citizen'", [requestId]);
+        demand(item, 'Pending citizen request not found.');
+        if (payload.decision === 'Approved') {
+          const cases = all('SELECT id,area FROM complaints WHERE reporter_id=?', [item.user_id]);
+          for (const { id: complaintId, area } of cases) scrubCase(complaintId, area);
+          run("UPDATE audit SET detail='' WHERE actor_id=?", [item.user_id]);
+          run("UPDATE privacy_requests SET reason='',decision_note='' WHERE user_id=?", [item.user_id]);
+          run('DELETE FROM notifications WHERE user_id=?', [item.user_id]);
+          run('DELETE FROM account_tokens WHERE user_id=?', [item.user_id]);
+          run('DELETE FROM backup_access WHERE user_id=?', [item.user_id]);
+          run("UPDATE users SET name='Deleted resident',email=?,area='',password_hash=?,verified_area=0,email_verified=0,active=0,mfa_secret=NULL,mfa_pending=NULL,mfa_pending_expires=NULL WHERE id=?", [`deleted-${item.user_id}@invalid.local`,hashPassword(crypto.randomBytes(32).toString('hex')),item.user_id]);
+        }
+        run('UPDATE privacy_requests SET status=?,decision_note=?,decided_at=CURRENT_TIMESTAMP WHERE id=?', [payload.decision,payload.decision === 'Approved' ? '' : note,requestId]);
+        run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,`${payload.decision} data removal`,'privacy_request',requestId,payload.decision === 'Approved' ? '' : note]);
+        return { userId: item.user_id, approved: payload.decision === 'Approved' };
+      });
+    },
+    retentionPreview(user, payload) {
+      requireRole(user, ['superadmin']);
+      const days = Number(payload.days);
+      demand(Number.isInteger(days) && days >= 365 && days <= 3650, 'Choose 1 to 10 years.');
+      return one("SELECT COUNT(*) AS total FROM complaints WHERE status IN ('Closed','Finished','Rejected','Duplicate') AND retained_at IS NULL AND created_at<=datetime('now','-' || ? || ' days')", [days]).total;
+    },
+    applyRetention(user, payload) {
+      requireRole(user, ['superadmin']);
+      const days = Number(payload.days);
+      demand(Number.isInteger(days) && days >= 365 && days <= 3650, 'Choose 1 to 10 years.');
+      demand(payload.confirm === 'ANONYMIZE', 'Type ANONYMIZE to confirm.');
+      const saved = one('SELECT password_hash FROM users WHERE id=? AND active=1', [user.id]);
+      demand(saved && typeof payload.password === 'string' && payload.password.length <= 128 && verifyPassword(payload.password, saved.password_hash), 'Current password is incorrect.');
+      return transact(() => {
+        const cases = all("SELECT id,area FROM complaints WHERE status IN ('Closed','Finished','Rejected','Duplicate') AND retained_at IS NULL AND created_at<=datetime('now','-' || ? || ' days') ORDER BY id LIMIT 50", [days]);
+        for (const row of cases) scrubCase(row.id, row.area);
+        const remaining = one("SELECT COUNT(*) AS total FROM complaints WHERE status IN ('Closed','Finished','Rejected','Duplicate') AND retained_at IS NULL AND created_at<=datetime('now','-' || ? || ' days')", [days]).total;
+        run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Anonymized old cases','retention',0,`${days} days; ${cases.length} cases; ${remaining} remaining`]);
+        return { processed: cases.length, remaining };
       });
     },
     close() { close(); }

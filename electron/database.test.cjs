@@ -10,6 +10,89 @@ const { decryptBackup, restoreNew } = require('../scripts/restore-backup.cjs');
 
 const sample = { title: 'Broken crossing at the corner', description: 'Vehicles are swerving around the damaged crossing.', categoryId: 2, area: 'Dhanmondi', latitude: 23.7469, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' };
 
+const authenticatorCode = (secret, step = Math.floor(Date.now() / 30000)) => {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = 0, value = 0; const key = [];
+  for (const letter of secret) { value = (value << 5) | alphabet.indexOf(letter); bits += 5; if (bits >= 8) { key.push((value >>> (bits -= 8)) & 255); value &= (1 << bits) - 1; } }
+  const counter = Buffer.alloc(8); counter.writeBigUInt64BE(BigInt(step));
+  const digest = crypto.createHmac('sha1', Buffer.from(key)).update(counter).digest();
+  const offset = digest[19] & 15;
+  return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1000000).padStart(6, '0');
+};
+
+test('administrator authenticator protects login, blocks replay and survives password change', async () => {
+  const db = await createDatabase(':memory:');
+  try {
+    const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
+    const setup = db.beginMfa(owner, 'owner-secret-password');
+    assert.match(setup.uri, /otpauth:\/\/totp\//);
+    assert.throws(() => db.confirmMfa(owner, { password: 'owner-secret-password', code: '000000' }), /Invalid authenticator/);
+    db.confirmMfa(owner, { password: 'owner-secret-password', code: authenticatorCode(setup.secret) });
+    assert.equal(db.userById(owner.id).mfaEnabled, true);
+    assert.throws(() => db.login('owner@example.test', 'owner-secret-password'), /Authenticator code required/);
+    assert.throws(() => db.login('owner@example.test', 'wrong-password', authenticatorCode(setup.secret)), /Invalid email or password/);
+    const currentStep = Math.floor(Date.now() / 30000);
+    assert.equal(db.login('owner@example.test', 'owner-secret-password', authenticatorCode(setup.secret, currentStep)).id, owner.id);
+    assert.throws(() => db.login('owner@example.test', 'owner-secret-password', authenticatorCode(setup.secret, currentStep)), /Invalid authenticator/);
+    db.changePassword(owner, { currentPassword: 'owner-secret-password', newPassword: 'new-owner-secret-password' });
+    assert.throws(() => db.login('owner@example.test', 'owner-secret-password', authenticatorCode(setup.secret, currentStep + 1)), /Invalid email or password/);
+    assert.equal(db.login('owner@example.test', 'new-owner-secret-password', authenticatorCode(setup.secret, currentStep + 1)).id, owner.id);
+    db.disableMfa(owner, { password: 'new-owner-secret-password', code: authenticatorCode(setup.secret) });
+    assert.equal(db.login('owner@example.test', 'new-owner-secret-password').mfaEnabled, false);
+  } finally { db.close(); }
+});
+
+test('citizen data removal requires owner review and scrubs report details', async () => {
+  const db = await createDatabase(':memory:');
+  try {
+    const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'Private Resident', email: 'private@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const complaintId = db.createComplaint(citizen, sample);
+    assert.throws(() => db.requestPrivacyRemoval(citizen, { password: 'wrong' }), /password/);
+    const requestId = db.requestPrivacyRemoval(citizen, { password: 'citizen-password-123', reason: 'Please remove my details.' });
+    assert.equal(db.snapshot(citizen).privacyRequest.status, 'Pending');
+    assert.throws(() => db.requestPrivacyRemoval(citizen, { password: 'citizen-password-123' }), /already pending/);
+    assert.throws(() => db.decidePrivacyRemoval(citizen, { requestId, decision: 'Approved' }), /permission/);
+    const decision = db.decidePrivacyRemoval(owner, { requestId, decision: 'Approved' });
+    assert.equal(decision.userId, citizen.id);
+    assert.equal(db.userById(citizen.id), null);
+    assert.throws(() => db.login('private@example.test', 'citizen-password-123'), /Invalid email or password/);
+    const report = db.complaintDetail(owner, { id: complaintId }).complaint;
+    assert.equal(report.title, 'Archived citizen report');
+    assert.equal(report.image, null);
+    assert.equal(report.description.includes('Vehicles'), false);
+    assert.equal(db.snapshot(owner).privacyRequests[0].reason, '');
+  } finally { db.close(); }
+});
+
+test('owner can preview and anonymize only old terminal cases', async () => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'civicpulse-retention-'));
+  const file = path.join(folder, 'cases.sqlite');
+  try {
+    let db = await createDatabase(file);
+    const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const oldId = db.createComplaint(citizen, sample);
+    db.act(owner, { id: oldId, action: 'reject', note: 'Cannot verify the old report.' });
+    const activeId = db.createComplaint(citizen, { ...sample, title: 'Current crossing damage' });
+    db.close();
+    const SQL = await initSqlJs({ locateFile: () => require.resolve('sql.js/dist/sql-wasm.wasm') });
+    const raw = new SQL.Database(fs.readFileSync(file));
+    raw.run("UPDATE complaints SET created_at=datetime('now','-800 days') WHERE id IN (?,?)", [oldId,activeId]);
+    fs.writeFileSync(file, Buffer.from(raw.export())); raw.close();
+    db = await createDatabase(file);
+    assert.equal(db.retentionPreview(owner, { days: 730 }), 1);
+    assert.throws(() => db.applyRetention(citizen, { days: 730, password: 'citizen-password-123', confirm: 'ANONYMIZE' }), /permission/);
+    assert.throws(() => db.applyRetention(owner, { days: 730, password: 'wrong', confirm: 'ANONYMIZE' }), /password/);
+    assert.equal(db.applyRetention(owner, { days: 730, password: 'owner-secret-password', confirm: 'ANONYMIZE' }).processed, 1);
+    assert.equal(db.retentionPreview(owner, { days: 730 }), 0);
+    assert.equal(db.complaintDetail(owner, { id: oldId }).complaint.image, null);
+    assert.equal(db.complaintDetail(owner, { id: activeId }).complaint.title, 'Current crossing damage');
+    assert.equal(db.areaSummary(owner, { query: 'Dhaka' }).total, 1);
+    db.close();
+  } finally { assert.ok(path.resolve(folder).startsWith(path.resolve(os.tmpdir()) + path.sep)); fs.rmSync(folder, { recursive: true, force: true }); }
+});
+
 test('repair evidence, citizen rework review and department scorecard', async () => {
   const db = await createDatabase(':memory:');
   try {

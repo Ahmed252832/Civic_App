@@ -18,7 +18,7 @@ const os = require('node:os');
     await window.getByRole('button', { name: 'Create owner account' }).click();
     await window.locator('.hero h1').waitFor();
     await window.locator('.top-avatar').click();
-    await window.locator('.profile-security').last().getByLabel('Current password').fill('packaged-password-123');
+    await window.locator('.profile-security').filter({ hasText: 'Generate a one-time code' }).getByLabel('Password to generate recovery code').fill('packaged-password-123');
     await window.getByRole('button', { name: 'Generate new recovery code' }).click();
     const recoveryCode = await window.locator('.recovery-code').textContent();
     if (recoveryCode?.length !== 43) throw new Error('The packaged app did not generate a recovery code.');

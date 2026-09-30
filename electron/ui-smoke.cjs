@@ -50,7 +50,7 @@ const assert = require('node:assert/strict');
     await window.locator('.complaint-row').last().click();
     await window.getByText('Issue details').waitFor();
     await window.locator('.detail-drawer h3').getByText('Broken crossing number 1', { exact: true }).waitFor();
-    await window.locator('.detail-drawer .icon-button').click();
+    await window.getByRole('button', { name: 'Close details' }).click();
     await window.locator('.top-avatar').click();
     await window.locator('.content .section-heading h2').getByText('Account security').waitFor();
     await window.locator('.profile-mini').click();

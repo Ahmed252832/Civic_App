@@ -80,7 +80,7 @@ app.whenReady().then(async () => {
         return { ok: true, data: account };
       }
       if (method === 'login') {
-        const account = database.login(payload.email, payload.password);
+        const account = database.login(payload.email, payload.password, payload.code);
         currentUserId = account.id;
         return { ok: true, data: account };
       }
@@ -110,6 +110,13 @@ app.whenReady().then(async () => {
         case 'manage': result = database.manage(actor, payload); break;
         case 'changePassword': result = database.changePassword(actor, payload); break;
         case 'issueRecoveryCode': result = database.issueRecoveryCode(actor, payload.password); break;
+        case 'beginMfa': result = database.beginMfa(actor, payload.password); break;
+        case 'confirmMfa': result = database.confirmMfa(actor, payload); break;
+        case 'disableMfa': result = database.disableMfa(actor, payload); break;
+        case 'requestPrivacyRemoval': result = database.requestPrivacyRemoval(actor, payload); break;
+        case 'decidePrivacyRemoval': result = database.decidePrivacyRemoval(actor, payload); if (result.approved && currentUserId === result.userId) currentUserId = null; break;
+        case 'retentionPreview': result = database.retentionPreview(actor, payload); break;
+        case 'applyRetention': result = database.applyRetention(actor, payload); break;
         case 'requestVerification': throw new Error('Email verification is available only on the hosted site when a mail provider is configured.');
         case 'beginBackup': result = database.beginBackup(actor, payload); break;
         case 'backupPage': result = database.backupPage(actor, payload); break;

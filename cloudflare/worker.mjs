@@ -164,7 +164,7 @@ export class CivicState {
         this.rateLimit(request, 'forgot', 5);
         if (!mailReady(this.env)) throw new Error('Email recovery is not configured yet. Contact the platform owner.');
         const account = this.store.findActiveEmail(payload.email);
-        if (account) {
+        if (account?.emailVerified) {
           try { const issued = this.store.issueAccountToken(account.id, 'reset'); await sendAccountMail(this.env, issued.email, 'reset', issued.token); }
           catch (error) { console.error('Recovery email failed:', error instanceof Error ? error.message : 'unknown error'); }
         }
@@ -189,7 +189,7 @@ export class CivicState {
       }
       if (method === 'login') {
         this.rateLimit(request, 'login', 20);
-        const user = this.store.login(payload.email, payload.password);
+        const user = this.store.login(payload.email, payload.password, payload.code);
         return json(200, { ok: true, data: user }, { 'Set-Cookie': await this.newSession(user) });
       }
       if (method === 'logout') {
@@ -231,6 +231,34 @@ export class CivicState {
       if (method === 'issueRecoveryCode') {
         this.rateLimit(request, 'recovery-code-issue', 5);
         return json(200, { ok: true, data: this.store.issueRecoveryCode(user, payload.password) });
+      }
+      if (method === 'beginMfa') {
+        this.rateLimit(request, 'mfa-setup', 5);
+        return json(200, { ok: true, data: this.store.beginMfa(user, payload.password) });
+      }
+      if (method === 'confirmMfa' || method === 'disableMfa') {
+        this.rateLimit(request, 'mfa-change', 8);
+        const data = method === 'confirmMfa' ? this.store.confirmMfa(user, payload) : this.store.disableMfa(user, payload);
+        this.state.storage.sql.exec('DELETE FROM sessions WHERE user_id=?', user.id);
+        return json(200, { ok: true, data }, { 'Set-Cookie': await this.newSession(user) });
+      }
+      if (method === 'requestPrivacyRemoval') {
+        this.rateLimit(request, 'privacy-request', 4);
+        return json(200, { ok: true, data: this.store.requestPrivacyRemoval(user, payload) });
+      }
+      if (method === 'decidePrivacyRemoval') {
+        this.rateLimit(request, 'privacy-decision', 10);
+        const data = this.store.decidePrivacyRemoval(user, payload);
+        if (data.approved) {
+          this.state.storage.sql.exec('DELETE FROM sessions WHERE user_id=?', data.userId);
+          this.state.storage.sql.exec('DELETE FROM push_subscriptions WHERE user_id=?', data.userId);
+        }
+        return json(200, { ok: true, data });
+      }
+      if (method === 'retentionPreview') return json(200, { ok: true, data: this.store.retentionPreview(user, payload) });
+      if (method === 'applyRetention') {
+        this.rateLimit(request, 'retention', 5);
+        return json(200, { ok: true, data: this.store.applyRetention(user, payload) });
       }
       if (method === 'create' && user.role === 'citizen' && mailReady(this.env) && !user.emailVerified) throw new Error('Verify your email before submitting a complaint. Open Account security to resend the link.');
       const notificationsBefore = this.state.storage.sql.exec('SELECT COALESCE(MAX(id),0) AS id FROM notifications').toArray()[0].id;

@@ -40,3 +40,22 @@ export async function downloadEncryptedBackup(password: string, passphrase: stri
     await request('endBackup', { token: access.token }).catch(() => {});
   }
 }
+
+export async function verifyEncryptedBackup(file: File, passphrase: string): Promise<{ createdAt: string; accounts: number; complaints: number }> {
+  if (file.size > 200 * 1024 * 1024) throw new Error('Backup file is too large to check in this browser.');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes.length < 50 || new TextDecoder().decode(bytes.slice(0, 5)) !== 'CPBK1') throw new Error('This is not a CivicPulse encrypted backup.');
+  try {
+    const salt = bytes.slice(5, 21), iv = bytes.slice(21, 33), body = bytes.slice(33);
+    const material = await crypto.subtle.importKey('raw', encoder.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+    const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 310_000, hash: 'SHA-256' }, material, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, body);
+    const archive = JSON.parse(new TextDecoder().decode(plain)) as { format?: string; createdAt?: string; tables?: Record<string, unknown> };
+    const required = ['departments','categories','users','complaints','updates','cycles','feedback','audit'];
+    if (archive.format !== 'civicpulse-backup-v1' || !archive.tables || required.some(table => !Array.isArray(archive.tables?.[table])) || !archive.createdAt || !Number.isFinite(Date.parse(archive.createdAt))) throw new Error('Backup contents are incomplete.');
+    return { createdAt: archive.createdAt, accounts: (archive.tables.users as unknown[]).length, complaints: (archive.tables.complaints as unknown[]).length };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'OperationError') throw new Error('Could not decrypt the backup. Check the passphrase and file.');
+    throw error;
+  }
+}

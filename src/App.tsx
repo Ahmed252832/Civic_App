@@ -5,11 +5,11 @@ import {
   MessageSquare, Plus, Search, Settings, ShieldCheck, Sparkles, Upload, Users, X
 } from 'lucide-react';
 import { onNotice, request } from './api';
-import { downloadEncryptedBackup } from './backup';
+import { downloadEncryptedBackup, verifyEncryptedBackup } from './backup';
 import { disablePush, enablePush, pushAvailable } from './push';
 import { TurnstileChallenge } from './Turnstile';
 import { IssueMap, LocationPicker } from './MapViews';
-import type { AreaSummary, Category, Complaint, ComplaintDetail, Department, Feedback, PageResult, Performance, Snapshot, User } from './types';
+import type { AreaSummary, Category, Complaint, ComplaintDetail, Department, Feedback, PageResult, Performance, PrivacyRequest, Snapshot, User } from './types';
 
 type Page = 'dashboard' | 'complaints' | 'report' | 'notifications' | 'map' | 'feedback' | 'analytics' | 'performance' | 'manage' | 'profile';
 const date = (value: string) => new Date(value.replace(' ', 'T') + (value.includes('Z') ? '' : 'Z')).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -46,9 +46,10 @@ function ComplaintList({ items, onOpen, compact = false }: { items: Complaint[];
     <Badge value={c.status} /><ArrowRight size={16} className="row-arrow" />
   </button>)}</div>;
 }
-function Login({ onLogin, onRegister, onForgot, onRecoverCode, emailEnabled, turnstileSiteKey, busy, error }: { onLogin: (email: string, password: string) => Promise<void>; onRegister: (details: { name: string; email: string; area: string; password: string; turnstileToken?: string }) => Promise<void>; onForgot: (email: string) => Promise<boolean>; onRecoverCode: (code: string, password: string) => Promise<boolean>; emailEnabled: boolean; turnstileSiteKey: string | null; busy: boolean; error: string }) {
+function Login({ onLogin, onRegister, onForgot, onRecoverCode, emailEnabled, turnstileSiteKey, busy, error }: { onLogin: (email: string, password: string, code: string) => Promise<void>; onRegister: (details: { name: string; email: string; area: string; password: string; turnstileToken?: string }) => Promise<void>; onForgot: (email: string) => Promise<boolean>; onRecoverCode: (code: string, password: string) => Promise<boolean>; emailEnabled: boolean; turnstileSiteKey: string | null; busy: boolean; error: string }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [authenticatorCode, setAuthenticatorCode] = useState('');
   const [name, setName] = useState('');
   const [area, setArea] = useState('');
   const [registering, setRegistering] = useState(false);
@@ -65,11 +66,12 @@ function Login({ onLogin, onRegister, onForgot, onRecoverCode, emailEnabled, tur
     <div className="login-copy"><span className="eyebrow">A clearer view of Dhaka</span><h1>Every report moves Dhaka forward.</h1><p>Follow Dhaka city issues from first report to community-verified resolution.</p></div>
     <div className="login-proof"><span><Check size={16} /> Public issue map</span><span><Check size={16} /> Traceable progress</span><span><Check size={16} /> Community feedback</span></div>
   </div><div className="login-right"><div className="login-box"><span className="eyebrow">CIVIC ISSUE TRACKER</span><h2>{recovering ? 'Recover your account' : registering ? 'Join your community' : 'Welcome back'}</h2><p className="muted">{recovering ? 'Enter your email to request a password reset link.' : registering ? 'Create a citizen account to report issues and track progress.' : 'Sign in to report, manage, or review local issues.'}</p>
-    <form onSubmit={e => { e.preventDefault(); if (recovering) void onForgot(email).then(setRecoverySent); else if (registering) void onRegister({ name, email, area, password, turnstileToken }).finally(() => { setTurnstileToken(''); setChallengeVersion(v => v + 1); }); else void onLogin(email,password); }}>
+    <form onSubmit={e => { e.preventDefault(); if (recovering) void onForgot(email).then(setRecoverySent); else if (registering) void onRegister({ name, email, area, password, turnstileToken }).finally(() => { setTurnstileToken(''); setChallengeVersion(v => v + 1); }); else void onLogin(email,password,authenticatorCode); }}>
       {registering && <label>Full name<input value={name} onChange={e => setName(e.target.value)} minLength={2} maxLength={80} required /></label>}
       <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} required /></label>
       {registering && <label>Your Dhaka neighborhood<input value={area} onChange={e => setArea(e.target.value)} minLength={2} maxLength={100} placeholder="e.g. Dhanmondi" required /></label>}
       {!recovering && <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} minLength={registering ? 10 : undefined} required /></label>}
+      {!recovering && !registering && (authenticatorCode || /authenticator code/i.test(error)) && <label>Authenticator code<input value={authenticatorCode} onChange={e => setAuthenticatorCode(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required /></label>}
       {registering && <p className="muted">{emailEnabled ? 'We will email you a verification link. Verify before submitting a complaint.' : 'Email verification is not configured yet. Use an address you control.'}</p>}{registering && turnstileSiteKey && <TurnstileChallenge key={challengeVersion} siteKey={turnstileSiteKey} onToken={setTurnstileToken} />}{recoverySent && <p role="status">If this account exists, a reset link is on its way.</p>}{error && <div className="error-box">{error}</div>}<button className="primary full" disabled={busy || (registering && !!turnstileSiteKey && !turnstileToken)}>{busy ? 'Please wait…' : recovering ? 'Send reset link' : registering ? 'Create citizen account' : 'Sign in'} <ArrowRight size={17} /></button></form>
     <div className="login-links"><button type="button" onClick={() => { if (registering || recovering) { setRegistering(false); setRecovering(false); } else setRegistering(true); setPassword(''); }}>{registering || recovering ? 'Back to sign in' : 'New citizen? Create an account'}</button>{!registering && !recovering && emailEnabled && <button type="button" onClick={() => { setRecovering(true); setRecoverySent(false); }}>Forgot password?</button>}{!registering && !recovering && <button type="button" onClick={() => setUsingCode(true)}>Use recovery code</button>}</div>
     </div></div></div>;
@@ -100,15 +102,18 @@ function AreaOverview({ userId }: { userId: number }) {
   const [error, setError] = useState('');
   useEffect(() => {
     let active = true;
+    let lastLoad = 0;
     const load = () => {
-      if (document.visibilityState !== 'visible') return;
+      if (document.visibilityState !== 'visible' || Date.now() - lastLoad < 60_000) return;
+      lastLoad = Date.now();
       void request<AreaSummary>('areaSummary', { query }).then(result => { if (active) { setSummary(result); setError(''); } }).catch(() => { if (active) setError('Area totals could not be loaded.'); });
     };
     const initial = window.setTimeout(load, query ? 250 : 0);
-    const timer = window.setInterval(load, 180000);
+    const timer = window.setInterval(load, 300000);
+    const forceLoad = () => { lastLoad = 0; load(); };
     window.addEventListener('focus', load);
-    window.addEventListener('civic:refresh', load);
-    return () => { active = false; window.clearTimeout(initial); window.clearInterval(timer); window.removeEventListener('focus', load); window.removeEventListener('civic:refresh', load); };
+    window.addEventListener('civic:refresh', forceLoad);
+    return () => { active = false; window.clearTimeout(initial); window.clearInterval(timer); window.removeEventListener('focus', load); window.removeEventListener('civic:refresh', forceLoad); };
   }, [query, userId]);
   return <section className="card area-overview"><SectionHeading eyebrow="ALL DHAKA REPORTS" title="Complaints by area" right={<span className="count-pill">{summary?.cityTotal ?? '—'} citywide</span>} /><p className="muted">Search an area to see its total across all citizens and statuses. Individual reports are not shown here.</p><div className="search-box"><Search size={18} /><input aria-label="Search an area" placeholder="Search a Dhaka area, e.g. Dhanmondi" value={query} onChange={event => setQuery(event.target.value)} maxLength={80} /></div>{error && <p role="status">{error}</p>}<div className="area-grid"><div className="area-total"><span>{query ? `Matching “${query}”` : 'All Dhaka areas'}</span><strong>{summary?.total ?? '—'}</strong></div></div>{summary && query && summary.total === 0 && <p className="muted">No complaints found for this area.</p>}</section>;
 }
@@ -167,12 +172,12 @@ function Complaints({ data, onOpen }: { data: Snapshot; onOpen: (id: number) => 
 
 function readImage(file: File): Promise<string> {
   return new Promise((resolve,reject) => {
-    if (!['image/png','image/jpeg','image/webp'].includes(file.type) || file.size > 2_000_000) return reject(new Error('Choose a PNG, JPEG or WebP image under 2 MB.'));
+    if (!['image/png','image/jpeg','image/webp'].includes(file.type) || file.size > 8_000_000) return reject(new Error('Choose a PNG, JPEG or WebP image under 8 MB.'));
     const objectUrl = URL.createObjectURL(file);
     const image = new Image();
     image.onload = () => {
       URL.revokeObjectURL(objectUrl);
-      for (const [limit, quality] of [[1200,.78],[960,.67],[760,.55]] as const) {
+      for (const [limit, quality] of [[1200,.78],[960,.67],[760,.55],[640,.45]] as const) {
         const scale = Math.min(1, limit / Math.max(image.naturalWidth, image.naturalHeight));
         const canvas = document.createElement('canvas');
         canvas.width = Math.max(1, Math.round(image.naturalWidth * scale)); canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
@@ -208,7 +213,7 @@ function Report({ data, onCreated, showError, turnstileSiteKey }: { data: Snapsh
   return <><SectionHeading eyebrow="HELP YOUR NEIGHBORHOOD" title="Report an issue" /><div className="report-layout"><form className="card report-form" onSubmit={submit}><div className="form-intro"><span className="step">01</span><div><h3>Tell us what happened</h3><p>A clear report helps the right team respond quickly.</p></div></div><div className="form-grid"><label className="wide">Issue title<input value={title} onChange={e => setTitle(e.target.value)} minLength={6} maxLength={120} placeholder="e.g. Large pothole near the main crossing" required /></label><label className="wide">Description<textarea value={description} onChange={e => setDescription(e.target.value)} minLength={12} rows={4} placeholder="Describe the problem and anything residents should know…" required /></label><label>Category<select value={categoryId} onChange={e => setCategoryId(Number(e.target.value))} required><option value={0}>Choose category</option>{data.categories.filter(c => c.active).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label><label>Severity<select value={severity} onChange={e => setSeverity(e.target.value)}>{['Low','Medium','High','Critical'].map(x => <option key={x}>{x}</option>)}</select></label><label className="wide">Dhaka neighborhood<input value={area} onChange={e => setArea(e.target.value)} required /></label></div>{categoryId > 0 && <p className="target-preview">Closure target for this category: {data.categories.find(c => c.id === categoryId)?.resolution_hours || 168} hours after submission. This is an internal target, not a guaranteed repair time.</p>}
     <div className="form-intro middle"><span className="step">02</span><div><h3>Pin the exact location</h3><p>Choose a point on the map, or enter coordinates using a keyboard.</p></div></div><LocationPicker value={point} onPick={(latitude, longitude) => setCoordinates(latitude.toFixed(5), longitude.toFixed(5))} /><div className="form-grid coordinate-inputs"><label>Latitude<input type="number" inputMode="decimal" step="any" min="23.68" max="23.92" value={latitudeText} onChange={e => setCoordinates(e.target.value, longitudeText)} placeholder="23.74690" /></label><label>Longitude<input type="number" inputMode="decimal" step="any" min="90.30" max="90.53" value={longitudeText} onChange={e => setCoordinates(latitudeText, e.target.value)} placeholder="90.37540" /></label></div><p className="coordinate" role="status">{point ? `Selected ${point.latitude.toFixed(5)}, ${point.longitude.toFixed(5)}` : 'Enter a point inside the Dhaka service area (23.68–23.92 N, 90.30–90.53 E).'}</p>
     {nearby.length > 0 && <div className="duplicate-warning"><strong>Similar reports nearby</strong><p>Someone may already have reported this issue. You can still submit a new report.</p>{nearby.map(item => <div key={item.id}>{item.code} · {item.title} · {item.distance} m · {item.status}</div>)}</div>}
-    <div className="form-intro middle"><span className="step">03</span><div><h3>Add evidence</h3><p>One photo helps the team identify the issue.</p></div></div><label className="upload-box"><Upload size={22} /><strong>{image ? 'Photo attached' : 'Choose a photo'}</strong><small>PNG, JPEG or WebP · maximum 2 MB</small><input type="file" accept="image/png,image/jpeg,image/webp" onChange={async e => { try { setImage(e.target.files?.[0] ? await readImage(e.target.files[0]) : null); } catch (err) { showError(String(err)); } }} /></label>{image && <img className="preview-image" src={image} alt="Complaint evidence preview" />}
+    <div className="form-intro middle"><span className="step">03</span><div><h3>Add evidence</h3><p>One photo helps the team identify the issue.</p></div></div><label className="upload-box"><Upload size={22} /><strong>{image ? 'Photo attached' : 'Choose a photo'}</strong><small>PNG, JPEG or WebP · up to 8 MB; optimized before upload</small><input type="file" accept="image/png,image/jpeg,image/webp" onChange={async e => { try { setImage(e.target.files?.[0] ? await readImage(e.target.files[0]) : null); } catch (err) { showError(String(err)); } }} /></label>{image && <img className="preview-image" src={image} alt="Complaint evidence preview" />}
     {turnstileSiteKey && <TurnstileChallenge key={challengeVersion} siteKey={turnstileSiteKey} onToken={setTurnstileToken} />}<button className="primary submit-report" disabled={busy || (!!turnstileSiteKey && !turnstileToken)}>{busy ? 'Submitting…' : 'Submit complaint'} <ArrowRight size={18} /></button></form><aside className="report-aside"><div className="card aside-card"><div className="aside-icon"><ShieldCheck size={23} /></div><h3>What happens next?</h3><div className="mini-timeline"><span>1</span><p>An administrator verifies your report.</p><span>2</span><p>The responsible department receives it.</p><span>3</span><p>You can follow updates and review completed work.</p></div></div><div className="aside-tip"><MapPin size={19} /><p>Your report appears on the Dhaka issue map after administrator verification. Its public location is approximate. Avoid personal details in the title and photos.</p></div></aside></div></>;
 }
 
@@ -260,7 +265,38 @@ function PerformancePage({ data, onPage, onOpen, showError }: { data: Snapshot; 
     <div className="card"><SectionHeading eyebrow="AREA OUTPUT" title="Accomplished work by area" right={<select aria-label="Filter department" value={departmentId} onChange={event => setDepartmentId(event.target.value)}><option value="all">All departments</option>{report?.departments.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}</select>} />{areas.length ? <div className="area-performance-chart">{areas.map(row => <div className="area-performance-row" key={`${row.department_id}:${row.area}`}><div><strong>{row.area}</strong><small>{row.department} · {row.average_rating?.toFixed(1)} ★</small></div><div className="bar-track"><i style={{width: `${row.finished / top * 100}%`}} /></div><b>{row.finished}</b></div>)}</div> : <Empty title="No finished work yet" text="The graph will fill after citizens verify repairs and you move them to Finished work." />}</div></>;
 }
 
-function Profile({ user, showError, emailEnabled, pushPublicKey }: { user: User; showError: (message: string) => void; emailEnabled: boolean; pushPublicKey: string | null }) {
+function AuthenticatorPanel({ user, refresh, showError }: { user: User; refresh: () => Promise<void>; showError: (message: string) => void }) {
+  const [password, setPassword] = useState('');
+  const [code, setCode] = useState('');
+  const [setup, setSetup] = useState<{ secret: string; uri: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState('');
+  const run = async (method: 'beginMfa' | 'confirmMfa' | 'disableMfa') => {
+    setBusy(true); setStatus('');
+    try {
+      if (method === 'beginMfa') setSetup(await request<{ secret: string; uri: string }>(method, { password }));
+      else { await request(method, { password, code }); setSetup(null); setPassword(''); setCode(''); await refresh(); setStatus(method === 'confirmMfa' ? 'Authenticator sign-in enabled. Other sessions were signed out.' : 'Authenticator sign-in disabled.'); }
+    } catch (error) { showError(String(error instanceof Error ? error.message : error)); }
+    finally { setBusy(false); }
+  };
+  if (!['admin','superadmin'].includes(user.role)) return null;
+  return <div className="card profile-security"><h3>Authenticator sign-in</h3><p className="muted">Protect this administrative account with a six-digit code from an authenticator app. Save a recovery code before enabling this.</p><p role="status">{user.mfaEnabled ? 'Enabled' : 'Not enabled'}</p><div className="account-form"><label>Password for authenticator<input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></label>{setup && !user.mfaEnabled && <div className="security-key"><p>Add an account in your authenticator app using this setup key. It expires here after ten minutes.</p><code>{setup.secret}</code><small>Account: CivicPulse · {user.email} · 6 digits · 30 seconds</small></div>}{(setup || user.mfaEnabled) && <label>Six-digit code<input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} /></label>}<button type="button" className={user.mfaEnabled ? 'secondary' : 'primary'} disabled={busy || !password || ((setup || user.mfaEnabled) && code.length !== 6)} onClick={() => void run(user.mfaEnabled ? 'disableMfa' : setup ? 'confirmMfa' : 'beginMfa')}>{busy ? 'Please wait…' : user.mfaEnabled ? 'Disable authenticator' : setup ? 'Confirm and enable' : 'Set up authenticator'}</button>{status && <p role="status">{status}</p>}</div></div>;
+}
+
+function PrivacyPanel({ requestState, refresh, showError }: { requestState: PrivacyRequest | null; refresh: () => Promise<void>; showError: (message: string) => void }) {
+  const [password, setPassword] = useState('');
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault(); setBusy(true);
+    try { await request('requestPrivacyRemoval', { password, reason }); setPassword(''); setReason(''); await refresh(); }
+    catch (error) { showError(String(error instanceof Error ? error.message : error)); }
+    finally { setBusy(false); }
+  };
+  return <div className="card profile-security"><h3>Remove my personal data</h3><p className="muted">Request owner review of your account and reports. Approval disables sign-in and removes your name, email, detailed location, written case details, and photos. Anonymous case status and totals remain. Earlier encrypted backups may retain the original records until those copies are removed.</p>{requestState && <p role="status">Latest request: {requestState.status} · {date(requestState.created_at)}{requestState.decision_note ? ` · ${requestState.decision_note}` : ''}</p>}{requestState?.status !== 'Pending' && <form className="account-form" onSubmit={submit}><label>Reason (optional)<textarea value={reason} maxLength={500} onChange={event => setReason(event.target.value)} rows={2} /></label><label>Current password<input type="password" value={password} onChange={event => setPassword(event.target.value)} required /></label><button className="secondary danger" disabled={busy}>{busy ? 'Sending…' : 'Request data removal'}</button></form>}</div>;
+}
+
+function Profile({ user, showError, emailEnabled, pushPublicKey, privacyRequest, refresh }: { user: User; showError: (message: string) => void; emailEnabled: boolean; pushPublicKey: string | null; privacyRequest: PrivacyRequest | null; refresh: () => Promise<void> }) {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -279,7 +315,7 @@ function Profile({ user, showError, emailEnabled, pushPublicKey }: { user: User;
   const generateCode = async (event: FormEvent) => { event.preventDefault(); setBusy(true); setRecoveryCode(''); try { setRecoveryCode(await request<string>('issueRecoveryCode', { password: recoveryPassword })); setRecoveryPassword(''); } catch (error) { showError(String(error instanceof Error ? error.message : error)); } finally { setBusy(false); } };
   const turnOnAlerts = async () => { if (!pushPublicKey) return; setBusy(true); try { const status = await enablePush(pushPublicKey); setPushStatus(status === 'enabled' ? 'Browser alerts enabled on this device.' : status === 'denied' ? 'Browser notification permission was declined. Change it in browser settings.' : 'This browser does not support background alerts.'); } catch (error) { showError(String(error instanceof Error ? error.message : error)); } finally { setBusy(false); } };
   const turnOffAlerts = async () => { setBusy(true); try { await disablePush(); setPushStatus('Browser alerts disabled on this device.'); } catch (error) { showError(String(error instanceof Error ? error.message : error)); } finally { setBusy(false); } };
-  return <><SectionHeading eyebrow="YOUR ACCOUNT" title="Account security" /><div className="card profile-security"><h3>{user.name}</h3><p>{user.email} · {roleName[user.role]}</p><p>Email: {user.emailVerified ? 'verified' : emailEnabled ? 'verification needed' : 'verification not available yet'}</p>{!user.emailVerified && emailEnabled && <><button type="button" className="secondary" disabled={busy} onClick={() => void resend()}>Send verification link</button>{verificationSent && <p role="status">Verification link sent. Check your email, then click Refresh here.</p>}</>}<form className="account-form" onSubmit={submit}><label>Current password<input type="password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} required /></label><label>New password<input type="password" value={newPassword} onChange={event => setNewPassword(event.target.value)} minLength={12} maxLength={128} required /></label><button className="primary" disabled={busy}>{busy ? 'Saving…' : 'Change password'}</button></form>{saved && <p role="status">Password updated. Other signed-in devices have been signed out.</p>}</div>{pushPublicKey && pushAvailable() && <div className="card profile-security"><h3>Browser alerts</h3><p className="muted">Receive case updates even when this tab is closed. Your browser will ask for permission once.</p><div className="action-row"><button type="button" className="primary" disabled={busy} onClick={() => void turnOnAlerts()}>Enable alerts</button><button type="button" className="secondary" disabled={busy} onClick={() => void turnOffAlerts()}>Disable on this device</button></div>{pushStatus && <p role="status">{pushStatus}</p>}</div>}<div className="card profile-security"><h3>Recovery code</h3><p className="muted">Generate a one-time code while you can sign in. Save it privately outside this laptop. A new code replaces the previous one and expires after one year.</p><form className="account-form" onSubmit={generateCode}><label>Current password<input type="password" value={recoveryPassword} onChange={event => setRecoveryPassword(event.target.value)} required /></label><button className="secondary" disabled={busy}>Generate new recovery code</button></form>{recoveryCode && <div role="status"><p>Save this code now. It will not be shown again:</p><code className="recovery-code">{recoveryCode}</code></div>}</div></>;
+  return <><SectionHeading eyebrow="YOUR ACCOUNT" title="Account security" /><div className="card profile-security"><h3>{user.name}</h3><p>{user.email} · {roleName[user.role]}</p><p>Email: {user.emailVerified ? 'verified' : emailEnabled ? 'verification needed' : 'verification not available yet'}</p>{!user.emailVerified && emailEnabled && <><button type="button" className="secondary" disabled={busy} onClick={() => void resend()}>Send verification link</button>{verificationSent && <p role="status">Verification link sent. Check your email, then click Refresh here.</p>}</>}<form className="account-form" onSubmit={submit}><label>Current password<input type="password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} required /></label><label>New password<input type="password" value={newPassword} onChange={event => setNewPassword(event.target.value)} minLength={12} maxLength={128} required /></label><button className="primary" disabled={busy}>{busy ? 'Saving…' : 'Change password'}</button></form>{saved && <p role="status">Password updated. Other signed-in devices have been signed out.</p>}</div>{pushPublicKey && pushAvailable() && <div className="card profile-security"><h3>Browser alerts</h3><p className="muted">Receive case updates even when this tab is closed. Your browser will ask for permission once.</p><div className="action-row"><button type="button" className="primary" disabled={busy} onClick={() => void turnOnAlerts()}>Enable alerts</button><button type="button" className="secondary" disabled={busy} onClick={() => void turnOffAlerts()}>Disable on this device</button></div>{pushStatus && <p role="status">{pushStatus}</p>}</div>}<div className="card profile-security"><h3>Recovery code</h3><p className="muted">Generate a one-time code while you can sign in. Save it privately outside this laptop. A new code replaces the previous one and expires after one year.</p><form className="account-form" onSubmit={generateCode}><label>Password to generate recovery code<input type="password" value={recoveryPassword} onChange={event => setRecoveryPassword(event.target.value)} required /></label><button className="secondary" disabled={busy}>Generate new recovery code</button></form>{recoveryCode && <div role="status"><p>Save this code now. It will not be shown again:</p><code className="recovery-code">{recoveryCode}</code></div>}</div><AuthenticatorPanel user={user} refresh={refresh} showError={showError} />{user.role === 'citizen' && <PrivacyPanel requestState={privacyRequest} refresh={refresh} showError={showError} />}</>;
 }
 
 function Manage({ data, refresh, showError, backupEnabled }: { data: Snapshot; refresh: () => Promise<void>; showError: (message: string) => void; backupEnabled: boolean }) {
@@ -296,11 +332,55 @@ function Manage({ data, refresh, showError, backupEnabled }: { data: Snapshot; r
   const [backupPassphrase, setBackupPassphrase] = useState('');
   const [backupStatus, setBackupStatus] = useState('');
   const [backupBusy, setBackupBusy] = useState(false);
+  const [checkFile, setCheckFile] = useState<File | null>(null);
+  const [checkPassphrase, setCheckPassphrase] = useState('');
+  const [lastBackupCheck, setLastBackupCheck] = useState(() => localStorage.getItem('civicpulse:lastVerifiedBackup') || '');
+  const [checkStatus, setCheckStatus] = useState('');
+  const [privacyNote, setPrivacyNote] = useState('');
+  const [retentionDays, setRetentionDays] = useState('730');
+  const [retentionCount, setRetentionCount] = useState<number | null>(null);
+  const [retentionPassword, setRetentionPassword] = useState('');
+  const [retentionConfirm, setRetentionConfirm] = useState('');
+  const [retentionStatus, setRetentionStatus] = useState('');
   const saveBackup = async (event: FormEvent) => {
     event.preventDefault(); setBackupBusy(true); setBackupStatus('Starting backup…');
     try { await downloadEncryptedBackup(backupPassword, backupPassphrase, setBackupStatus); setBackupPassword(''); setBackupPassphrase(''); }
     catch (error) { setBackupStatus(''); showError(String(error instanceof Error ? error.message : error)); }
     finally { setBackupBusy(false); }
+  };
+  const checkBackup = async (event: FormEvent) => {
+    event.preventDefault(); if (!checkFile) return;
+    setBackupBusy(true); setCheckStatus('Checking encrypted file…');
+    try {
+      const checked = await verifyEncryptedBackup(checkFile, checkPassphrase);
+      const now = new Date().toISOString(); localStorage.setItem('civicpulse:lastVerifiedBackup', now); setLastBackupCheck(now);
+      setCheckStatus(`Verified backup from ${new Date(checked.createdAt).toLocaleString()}: ${checked.accounts} accounts and ${checked.complaints} reports. This checks decryption and structure; test a full local restore periodically.`);
+      setCheckPassphrase('');
+    } catch (error) { setCheckStatus(''); showError(String(error instanceof Error ? error.message : error)); }
+    finally { setBackupBusy(false); }
+  };
+  const reviewPrivacy = async (requestId: number, decision: 'Approved' | 'Declined') => {
+    if (decision === 'Approved' && !window.confirm('Approve removal of this citizen’s personal data and disable their account? This cannot be undone from the live app.')) return;
+    setBusy(true);
+    try { await request('decidePrivacyRemoval', { requestId, decision, note: privacyNote }); setPrivacyNote(''); await refresh(); }
+    catch (error) { showError(String(error instanceof Error ? error.message : error)); }
+    finally { setBusy(false); }
+  };
+  const previewRetention = async () => {
+    setBusy(true);
+    try { setRetentionCount(await request<number>('retentionPreview', { days: Number(retentionDays) })); setRetentionStatus(''); }
+    catch (error) { showError(String(error instanceof Error ? error.message : error)); }
+    finally { setBusy(false); }
+  };
+  const applyRetention = async (event: FormEvent) => {
+    event.preventDefault(); setBusy(true);
+    try {
+      const result = await request<{ processed: number; remaining: number }>('applyRetention', { days: Number(retentionDays), password: retentionPassword, confirm: retentionConfirm });
+      setRetentionPassword(''); setRetentionConfirm(''); setRetentionCount(result.remaining);
+      setRetentionStatus(`${result.processed} old cases anonymized. ${result.remaining} eligible cases remain. Repeat if needed.`);
+      await refresh();
+    } catch (error) { showError(String(error instanceof Error ? error.message : error)); }
+    finally { setBusy(false); }
   };
   const add = async (event: FormEvent) => { event.preventDefault(); setBusy(true); setManagementStatus(''); try { await request('manage', { type: kind, name, departmentId: departmentId || null }); setName(''); await refresh(); setManagementStatus(kind === 'department' ? 'Department created. Add a category assigned to it so citizens can choose that service.' : 'Category created and available for new reports.'); } catch (error) { showError(String(error instanceof Error ? error.message : error)); } finally { setBusy(false); } };
   const addAccount = async (event: FormEvent) => { event.preventDefault(); setBusy(true); try { await request('manage', { type: 'user', name: accountName, email: accountEmail, password: accountPassword, role: accountRole, departmentId: accountDepartment || null }); setAccountName(''); setAccountEmail(''); setAccountPassword(''); await refresh(); } catch (error) { showError(String(error instanceof Error ? error.message : error)); } finally { setBusy(false); } };
@@ -312,7 +392,9 @@ function Manage({ data, refresh, showError, backupEnabled }: { data: Snapshot; r
     <div className="card"><SectionHeading eyebrow="ACCESS" title="Team accounts" /><form className="account-form" onSubmit={addAccount}><input value={accountName} onChange={e => setAccountName(e.target.value)} placeholder="Full name" minLength={3} required /><input value={accountEmail} onChange={e => setAccountEmail(e.target.value)} type="email" placeholder="Work email" required /><input value={accountPassword} onChange={e => setAccountPassword(e.target.value)} type="password" minLength={10} placeholder="Temporary password (10+ characters)" required /><select value={accountRole} onChange={e => setAccountRole(e.target.value as 'staff' | 'admin')}><option value="staff">Department staff</option><option value="admin">Administrator</option></select>{accountRole === 'staff' && <select value={accountDepartment} onChange={e => setAccountDepartment(e.target.value)} required><option value="">Choose department</option>{data.departments.filter(d => d.active).map(d => <option value={d.id} key={d.id}>{d.name}</option>)}</select>}<button className="primary" disabled={busy}><Plus size={16} /> Add account</button></form><div className="settings-list">{data.users.map(u => <div key={u.id}><strong>{u.name}</strong><span>{roleName[u.role]} · {u.department_id ? data.departments.find(d => d.id === u.department_id)?.name + ' · ' : ''}{u.email}</span></div>)}</div></div></div>
     <div className="card"><SectionHeading eyebrow="SERVICE TARGETS" title="Closure deadlines by category" /><p className="muted">New complaints receive the selected category’s target. Changing a target does not rewrite deadlines already given to residents.</p><form className="target-form" onSubmit={saveTarget}><label>Category<select value={targetCategoryId} onChange={e => { setTargetCategoryId(e.target.value); setTargetHours(String(data.categories.find(c => c.id === Number(e.target.value))?.resolution_hours || 168)); }} required><option value="">Choose category</option>{data.categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label><label>Hours to closure<input type="number" min="1" max="720" step="1" value={targetHours} onChange={e => setTargetHours(e.target.value)} required /></label><button className="primary" disabled={busy}>Save target</button></form>{targetStatus && <p role="status">{targetStatus}</p>}<div className="target-grid">{data.categories.map(c => <span key={c.id}><strong>{c.name}</strong>{c.resolution_hours} hours</span>)}</div></div>
     <div className="card"><SectionHeading eyebrow="ACCESS CONTROL" title="Manage staff access" /><div className="settings-list">{data.users.filter(u => ['admin','staff'].includes(u.role)).map(u => <div key={u.id}><strong>{u.name} · {roleName[u.role]}</strong><span>{u.email} · {u.active ? 'Active' : 'Disabled'}</span><button type="button" className="account-toggle" disabled={busy} onClick={() => void changeAccount(u)}>{u.active ? 'Disable access' : 'Reactivate access'}</button></div>)}</div></div>
-    <div className="card"><SectionHeading eyebrow="DATA RECOVERY" title="Encrypted owner backup" /><p role="status">Scheduled offsite backup: {backupEnabled ? 'configured; check the private bucket for successful daily files' : 'not configured. Keep downloading manual encrypted backups.'}</p><p className="muted">Download a protected copy of accounts, reports, images, feedback, and audit records. Keep the backup passphrase in a separate safe place. This export can use significant browser memory as records grow.</p><form className="account-form" onSubmit={saveBackup}><label>Your current password<input type="password" autoComplete="current-password" value={backupPassword} onChange={e => setBackupPassword(e.target.value)} required /></label><label>Backup passphrase (16+ characters)<input type="password" autoComplete="new-password" minLength={16} value={backupPassphrase} onChange={e => setBackupPassphrase(e.target.value)} required /></label><button className="primary" disabled={backupBusy}><Download size={16} /> {backupBusy ? 'Preparing…' : 'Download encrypted backup'}</button></form>{backupStatus && <p role="status">{backupStatus}</p>}</div>
+    <div className="card"><SectionHeading eyebrow="DATA RECOVERY" title="Encrypted owner backup" /><p role="status">Scheduled offsite backup: {backupEnabled ? 'configured; check the private bucket for successful daily files' : 'not configured. Keep downloading manual encrypted backups.'}</p><p className="muted">Download a protected copy of accounts, reports, images, feedback, and audit records. Keep the backup passphrase in a separate safe place. This export can use significant browser memory as records grow.</p><form className="account-form" onSubmit={saveBackup}><label>Your current password<input type="password" autoComplete="current-password" value={backupPassword} onChange={e => setBackupPassword(e.target.value)} required /></label><label>Backup passphrase (16+ characters)<input type="password" autoComplete="new-password" minLength={16} value={backupPassphrase} onChange={e => setBackupPassphrase(e.target.value)} required /></label><button className="primary" disabled={backupBusy}><Download size={16} /> {backupBusy ? 'Preparing…' : 'Download encrypted backup'}</button></form>{backupStatus && <p role="status">{backupStatus}</p>}<p role="status">{lastBackupCheck ? `Last checked on this device: ${new Date(lastBackupCheck).toLocaleDateString()}${Date.now() - Date.parse(lastBackupCheck) > 7 * 86400000 ? ' · Check a fresh backup this week.' : ''}` : 'No encrypted backup has been checked on this device. Check one every week.'}</p><form className="account-form" onSubmit={checkBackup}><label>Check a downloaded .cpbk file<input type="file" accept=".cpbk" onChange={event => setCheckFile(event.target.files?.[0] || null)} required /></label><label>Its backup passphrase<input type="password" value={checkPassphrase} onChange={event => setCheckPassphrase(event.target.value)} required /></label><button className="secondary" disabled={backupBusy || !checkFile}>Verify backup file</button></form>{checkStatus && <p role="status">{checkStatus}</p>}</div>
+    <div className="card"><SectionHeading eyebrow="PRIVACY" title="Citizen data removal requests" /><p className="muted">Review a request before approving. Approval removes personal case details and photos, anonymizes the account, and signs the citizen out. Check old backup copies separately.</p>{data.privacyRequests.filter(item => item.status === 'Pending').length === 0 ? <p className="muted">No requests waiting for review.</p> : <div className="settings-list">{data.privacyRequests.filter(item => item.status === 'Pending').map(item => <div key={item.id}><strong>{item.name} · {item.email}</strong><span>Requested {date(item.created_at)}{item.reason ? ` · ${item.reason}` : ''}</span><label>Decision note<input value={privacyNote} maxLength={500} onChange={event => setPrivacyNote(event.target.value)} placeholder="Required when declining" /></label><div className="action-row"><button type="button" className="secondary danger" disabled={busy} onClick={() => void reviewPrivacy(item.id, 'Approved')}>Approve removal</button><button type="button" className="secondary" disabled={busy || privacyNote.trim().length < 5} onClick={() => void reviewPrivacy(item.id, 'Declined')}>Decline</button></div></div>)}</div>}</div>
+    <div className="card"><SectionHeading eyebrow="DATA RETENTION" title="Remove old case content" /><p className="muted">For closed, finished, rejected or duplicate reports older than the chosen age, remove written details and photos, reduce location precision, and retain status and counts. Each action handles up to 50 cases. Reporter account links remain until a citizen removal request is approved. Verify an encrypted backup first; old backup files must be reviewed separately.</p><div className="account-form"><label>Age in days (365–3650)<input type="number" min="365" max="3650" value={retentionDays} onChange={event => { setRetentionDays(event.target.value); setRetentionCount(null); }} /></label><button type="button" className="secondary" disabled={busy} onClick={() => void previewRetention()}>Preview eligible cases</button>{retentionCount !== null && <p role="status">{retentionCount} eligible cases</p>}</div>{retentionCount !== null && retentionCount > 0 && <form className="account-form" onSubmit={applyRetention}><label>Password to apply retention<input type="password" value={retentionPassword} onChange={event => setRetentionPassword(event.target.value)} required /></label><label>Type ANONYMIZE to confirm<input value={retentionConfirm} onChange={event => setRetentionConfirm(event.target.value)} required /></label><button className="secondary danger" disabled={busy || retentionConfirm !== 'ANONYMIZE'}>Anonymize up to 50 old cases</button></form>}{retentionStatus && <p role="status">{retentionStatus}</p>}</div>
     <div className="card"><SectionHeading eyebrow="ACCOUNTABILITY" title="Recent audit trail" /><div className="audit-list">{data.audit.slice(0, 12).map(a => <div key={a.id}><span className="audit-dot" /><span><strong>{a.actor}</strong> {a.action.toLowerCase()} {a.target_type} #{a.target_id}<small>{a.detail || '—'}</small></span><time>{date(a.created_at)}</time></div>)}</div></div></>;
 }
 
@@ -374,19 +456,21 @@ export default function App() {
   useEffect(() => {
     if (!user?.id) return;
     let active = true;
+    let lastCheck = Date.now();
     const update = () => {
-      if (document.visibilityState !== 'visible') return;
+      if (document.visibilityState !== 'visible' || Date.now() - lastCheck < 60_000) return;
+      lastCheck = Date.now();
       void request<Snapshot>('snapshot').then(snapshot => { if (active && snapshot.user.id === user.id) setData(snapshot); }).catch(() => {});
       if (selectedId !== null) void request<ComplaintDetail>('complaintDetail', { id: selectedId }).then(next => { if (active) setDetail(next); }).catch(() => {});
     };
-    const timer = window.setInterval(update, 90000);
+    const timer = window.setInterval(update, 300000);
     window.addEventListener('focus', update);
     document.addEventListener('visibilitychange', update);
     return () => { active = false; window.clearInterval(timer); window.removeEventListener('focus', update); document.removeEventListener('visibilitychange', update); };
   }, [user?.id, selectedId]);
   useEffect(() => onNotice(message => { setNotice(message); setTimeout(() => setNotice(''), 4500); }), []);
   useEffect(() => { window.scrollTo(0, 0); }, [page, user?.id]);
-  const login = async (email: string, password: string) => { setBusy(true); setError(''); try { const account = await request<User>('login', { email, password }); setUser(account); setPage('dashboard'); setSelectedId(null); await refresh(); } catch (err) { setError(String(err instanceof Error ? err.message : err)); } finally { setBusy(false); } };
+  const login = async (email: string, password: string, code: string) => { setBusy(true); setError(''); try { const account = await request<User>('login', { email, password, code }); setUser(account); setPage('dashboard'); setSelectedId(null); await refresh(); } catch (err) { setError(String(err instanceof Error ? err.message : err)); } finally { setBusy(false); } };
   const register = async (details: { name: string; email: string; area: string; password: string }) => { setBusy(true); setError(''); try { const account = await request<User>('register', details); setUser(account); setPage('dashboard'); await refresh(); } catch (err) { setError(String(err instanceof Error ? err.message : err)); } finally { setBusy(false); } };
   const setup = async (details: { key: string; name: string; email: string; password: string }) => { setBusy(true); setError(''); try { const account = await request<User>('bootstrap', details); setUser(account); setSetupRequired(false); await refresh(); } catch (err) { setError(String(err instanceof Error ? err.message : err)); } finally { setBusy(false); } };
   const logout = async () => { setSignOutBusy(true); try { await request('logout'); setSignOutOpen(false); setUser(null); setData(null); setPage('dashboard'); setSelectedId(null); setDetail(null); setError(''); } catch (err) { showError(String(err instanceof Error ? err.message : err)); } finally { setSignOutBusy(false); } };
@@ -419,7 +503,7 @@ export default function App() {
     {page === 'feedback' && <FeedbackPage data={data} onOpen={open} />}
     {page === 'analytics' && <Analytics data={data} />}
     {page === 'performance' && user.role === 'superadmin' && <PerformancePage data={data} onPage={setPage} onOpen={open} showError={showError} />}
-    {page === 'profile' && <Profile user={user} showError={showError} emailEnabled={emailEnabled} pushPublicKey={pushPublicKey} />}
+    {page === 'profile' && <Profile user={user} showError={showError} emailEnabled={emailEnabled} pushPublicKey={pushPublicKey} privacyRequest={data.privacyRequest} refresh={refresh} />}
     {page === 'manage' && user.role === 'superadmin' && <Manage data={data} refresh={refresh} showError={showError} backupEnabled={backupEnabled} />}
     {['admin','superadmin'].includes(user.role) && <div className="export-bar"><span>Need a copy of the current data?</span><button className="secondary" onClick={() => void request('exportCsv').catch(err => showError(String(err)))}><Download size={16} /> Export CSV</button><button className="secondary" onClick={() => void request('exportPdf').catch(err => showError(String(err)))}><Download size={16} /> Save PDF</button></div>}
   </main></div>{selected && detail && <Detail key={`${selected.id}-${user.id}`} data={{ ...data, updates: detail.updates, cycles: detail.cycles, feedback: detail.feedback }} complaint={selected} recurrence={detail.recurrence} escalationEvents={detail.escalationEvents || []} reopenRequests={detail.reopenRequests || []} onClose={() => { setSelectedId(null); setDetail(null); }} refresh={refreshDetail} showError={showError} />}{error && <div className="toast error-toast" role="alert"><Flag size={17} /> {error}<button onClick={() => setError('')} aria-label="Dismiss error"><X size={15} /></button></div>}{notice && <div className="toast success-toast" role="status"><Check size={17} /> {notice}</div>}{signOutOpen && <div className="confirm-backdrop" onClick={() => !signOutBusy && setSignOutOpen(false)}><div className="confirm-card" role="dialog" aria-modal="true" aria-labelledby="signout-title" onClick={event => event.stopPropagation()}><span className="eyebrow">ACCOUNT</span><h2 id="signout-title">Sign out of CivicPulse?</h2><p>You can sign in again to continue your work.</p><div className="confirm-actions"><button type="button" className="secondary" disabled={signOutBusy} onClick={() => setSignOutOpen(false)}>Stay signed in</button><button type="button" className="primary" disabled={signOutBusy} onClick={() => void logout()}>{signOutBusy ? 'Signing out…' : 'Sign out'}</button></div></div></div>}</div>;
