@@ -12,5 +12,5 @@
     "bindings": [{ "name": "CIVIC_STATE", "class_name": "CivicState" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CivicState"] }],
-  "triggers": { "crons": ["0 18 * * *"] }
+  "triggers": { "crons": ["0 * * * *"] }
 }

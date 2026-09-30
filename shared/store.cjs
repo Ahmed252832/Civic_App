@@ -1,7 +1,7 @@
 const crypto = require('node:crypto');
 const SEVERITIES = ['Low', 'Medium', 'High', 'Critical'];
 const ACTIVE = ['Submitted', 'Under Review', 'Verified', 'Assigned', 'In Progress', 'Reopened'];
-const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'audit'];
+const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'reopen_requests', 'audit'];
 // Operational pilot boundary for Dhaka city; replace with an approved city polygon before municipal use.
 const DHAKA_BOUNDS = { south: 23.68, north: 23.92, west: 90.30, east: 90.53 };
 const inDhaka = (latitude, longitude) => latitude >= DHAKA_BOUNDS.south && latitude <= DHAKA_BOUNDS.north && longitude >= DHAKA_BOUNDS.west && longitude <= DHAKA_BOUNDS.east;
@@ -48,6 +48,9 @@ function createStore(adapter, options = {}) {
   if (!complaintColumns.has('resolution_due_at')) run('ALTER TABLE complaints ADD COLUMN resolution_due_at TEXT');
   if (!complaintColumns.has('closed_at')) run('ALTER TABLE complaints ADD COLUMN closed_at TEXT');
   if (!complaintColumns.has('recurrence_of')) run('ALTER TABLE complaints ADD COLUMN recurrence_of INTEGER REFERENCES complaints(id)');
+  if (!complaintColumns.has('finished_at')) run('ALTER TABLE complaints ADD COLUMN finished_at TEXT');
+  if (!complaintColumns.has('escalation_level')) run('ALTER TABLE complaints ADD COLUMN escalation_level INTEGER NOT NULL DEFAULT 0');
+  run("UPDATE complaints SET finished_at=updated_at WHERE status='Finished' AND finished_at IS NULL");
   run("UPDATE complaints SET resolution_due_at=(SELECT datetime(complaints.created_at, '+' || COALESCE(k.resolution_hours,168) || ' hours') FROM categories k WHERE k.id=complaints.category_id) WHERE resolution_due_at IS NULL");
   run('CREATE TABLE IF NOT EXISTS area_counts (area_key TEXT PRIMARY KEY, total INTEGER NOT NULL)');
   if (!one('SELECT area_key FROM area_counts LIMIT 1') && one('SELECT COUNT(*) AS n FROM complaints').n > 0) {
@@ -60,6 +63,10 @@ function createStore(adapter, options = {}) {
     id INTEGER PRIMARY KEY, complaint_id INTEGER NOT NULL REFERENCES complaints(id), number INTEGER NOT NULL,
     resolved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, reopened_at TEXT, closed_at TEXT,
     UNIQUE(complaint_id, number))`);
+  const cycleColumns = new Set(all('PRAGMA table_info(cycles)').map(column => column.name));
+  if (!cycleColumns.has('completion_image')) run('ALTER TABLE cycles ADD COLUMN completion_image TEXT');
+  if (!cycleColumns.has('completion_note')) run("ALTER TABLE cycles ADD COLUMN completion_note TEXT NOT NULL DEFAULT ''");
+  run('UPDATE cycles SET completion_image=(SELECT completion_image FROM complaints WHERE complaints.id=cycles.complaint_id) WHERE completion_image IS NULL AND id=(SELECT MAX(id) FROM cycles y WHERE y.complaint_id=cycles.complaint_id)');
   run("UPDATE complaints SET closed_at=COALESCE((SELECT MAX(y.closed_at) FROM cycles y WHERE y.complaint_id=complaints.id),updated_at) WHERE closed_at IS NULL AND status='Closed'");
   run(`CREATE TABLE IF NOT EXISTS feedback (
     id INTEGER PRIMARY KEY, complaint_id INTEGER NOT NULL REFERENCES complaints(id), cycle_id INTEGER NOT NULL REFERENCES cycles(id),
@@ -69,6 +76,13 @@ function createStore(adapter, options = {}) {
   run(`CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), complaint_id INTEGER NOT NULL REFERENCES complaints(id),
     title TEXT NOT NULL, message TEXT NOT NULL, read_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
+  run(`CREATE TABLE IF NOT EXISTS escalation_events (
+    id INTEGER PRIMARY KEY, complaint_id INTEGER NOT NULL REFERENCES complaints(id), stage TEXT NOT NULL,
+    message TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
+  run(`CREATE TABLE IF NOT EXISTS reopen_requests (
+    id INTEGER PRIMARY KEY, complaint_id INTEGER NOT NULL REFERENCES complaints(id), user_id INTEGER NOT NULL REFERENCES users(id),
+    reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Pending', decision_note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, decided_at TEXT)`);
   run(`CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY, actor_id INTEGER NOT NULL REFERENCES users(id), action TEXT NOT NULL,
     target_type TEXT NOT NULL, target_id INTEGER NOT NULL, detail TEXT NOT NULL DEFAULT '',
@@ -87,6 +101,8 @@ function createStore(adapter, options = {}) {
   run('CREATE INDEX IF NOT EXISTS feedback_complaint_id ON feedback(complaint_id,id)');
   run('CREATE INDEX IF NOT EXISTS notifications_user_id ON notifications(user_id,id)');
   run('CREATE INDEX IF NOT EXISTS cycles_complaint_id ON cycles(complaint_id,id)');
+  run('CREATE INDEX IF NOT EXISTS reopen_requests_complaint_id ON reopen_requests(complaint_id,id)');
+  run('CREATE INDEX IF NOT EXISTS escalation_events_complaint_id ON escalation_events(complaint_id,id)');
 
   const log = (actor, complaint, action, oldStatus, newStatus, note = '') => {
     run('INSERT INTO updates (complaint_id,actor_id,action,old_status,new_status,note) VALUES (?,?,?,?,?,?)', [complaint, actor, action, oldStatus, newStatus, note]);
@@ -313,7 +329,10 @@ function createStore(adapter, options = {}) {
         .map(row => fullAccess || row.user_id === user.id ? row : { ...row, user_id: null, author: 'Resident', comment: '' });
       const recurrence = complaint.recurrence_of && privateAccess && user.role !== 'citizen'
         ? one('SELECT code,title,closed_at FROM complaints WHERE id=?', [complaint.recurrence_of]) : null;
-      return { complaint: safeCase(user, complaint), recurrence, updates, cycles, feedback };
+      const escalationEvents = privateAccess ? all('SELECT * FROM escalation_events WHERE complaint_id=? ORDER BY id DESC', [complaint.id]) : [];
+      const reopenRequests = (fullAccess || (user.role === 'citizen' && complaint.reporter_id === user.id))
+        ? all('SELECT * FROM reopen_requests WHERE complaint_id=? ORDER BY id DESC', [complaint.id]) : [];
+      return { complaint: safeCase(user, complaint), recurrence, updates, cycles, feedback, escalationEvents, reopenRequests };
     },
     summary(user) {
       demand(user, 'Please sign in.');
@@ -361,7 +380,89 @@ function createStore(adapter, options = {}) {
         JOIN feedback f ON f.id=(SELECT f2.id FROM feedback f2 JOIN cycles y ON y.id=f2.cycle_id WHERE y.complaint_id=c.id ORDER BY y.number DESC LIMIT 1)
         WHERE c.status IN ('Finished','Closed') AND f.resolution='Yes'
         GROUP BY c.department_id,c.area ORDER BY finished DESC,c.area`);
-      return { departments, areas };
+      const completed = all(`SELECT c.id,c.department_id,c.created_at,c.resolution_due_at,c.closed_at,c.resolved_at,c.finished_at,
+        (SELECT COUNT(*) FROM cycles y WHERE y.complaint_id=c.id AND y.reopened_at IS NOT NULL) AS reopen_count,
+        (SELECT COUNT(*) FROM feedback f JOIN cycles y ON y.id=f.cycle_id WHERE y.complaint_id=c.id AND f.resolution='Yes') AS rating_count
+        FROM complaints c WHERE c.status IN ('Finished','Closed') AND c.department_id IS NOT NULL AND c.closed_at IS NOT NULL`);
+      const byDepartment = new Map();
+      for (const row of completed) {
+        if (!byDepartment.has(row.department_id)) byDepartment.set(row.department_id, []);
+        byDepartment.get(row.department_id).push(row);
+      }
+      for (const row of departments) {
+        const cases = byDepartment.get(row.id) || [];
+        const durations = cases.map(c => (Date.parse(`${c.closed_at}Z`) - Date.parse(`${c.created_at}Z`)) / 3600000).filter(n => Number.isFinite(n) && n >= 0).sort((a,b) => a-b);
+        const middle = Math.floor(durations.length / 2);
+        row.median_confirmation_hours = durations.length ? Math.round((durations.length % 2 ? durations[middle] : (durations[middle-1] + durations[middle]) / 2) * 10) / 10 : null;
+        row.on_time_percent = cases.length ? Math.round(100 * cases.filter(c => c.resolution_due_at && c.closed_at <= c.resolution_due_at).length / cases.length) : null;
+        row.reopened_percent = cases.length ? Math.round(100 * cases.filter(c => c.reopen_count > 0).length / cases.length) : null;
+        row.rating_count = cases.reduce((sum,c) => sum + c.rating_count, 0);
+        row.sample_count = cases.length;
+      }
+      return { departments, areas, pendingReopenRequests: all(`SELECT r.id,r.complaint_id,c.code,c.title,r.reason,r.created_at FROM reopen_requests r JOIN complaints c ON c.id=r.complaint_id WHERE r.status='Pending' ORDER BY r.id DESC LIMIT 50`) };
+    },
+    requestReopen(user, payload) {
+      requireRole(user, ['citizen']);
+      const complaint = findComplaint(payload.id), reason = safeText(payload.reason, 1000);
+      demand(complaint.reporter_id === user.id && complaint.status === 'Finished', 'Only the reporter can request another repair after Finished work.');
+      demand(reason.length >= 12, 'Explain what failed again in at least 12 characters.');
+      demand(complaint.finished_at && Date.now() - Date.parse(`${complaint.finished_at}Z`) <= 14 * 86400000, 'The 14-day rework request period has ended. Submit a new report instead.');
+      demand(!one("SELECT id FROM reopen_requests WHERE complaint_id=? AND status='Pending'", [complaint.id]), 'A rework request is already awaiting review.');
+      return transact(() => {
+        run('INSERT INTO reopen_requests (complaint_id,user_id,reason) VALUES (?,?,?)', [complaint.id,user.id,reason]);
+        const requestId = id();
+        log(user.id,complaint.id,'Rework requested',complaint.status,complaint.status,reason);
+        const owners = all("SELECT id FROM users WHERE role='superadmin' AND active=1");
+        for (const owner of owners) run('INSERT INTO notifications (user_id,complaint_id,title,message) VALUES (?,?,?,?)', [owner.id,complaint.id,'Rework review needed',`${complaint.code}: The reporter says the repair failed again.`]);
+        return requestId;
+      });
+    },
+    decideReopen(user, payload) {
+      requireRole(user, ['superadmin']);
+      const requestId = Number(payload.requestId), decision = safeText(payload.decision, 20), note = safeText(payload.note, 1000);
+      demand(['Approved','Declined'].includes(decision), 'Choose approve or decline.');
+      demand(note.length >= 5, 'Explain the decision.');
+      const item = one('SELECT r.*,c.code,c.status AS complaint_status FROM reopen_requests r JOIN complaints c ON c.id=r.complaint_id WHERE r.id=?', [requestId]);
+      demand(item && item.status === 'Pending', 'This request was already reviewed.');
+      demand(item.status === 'Pending' && item.code && item.complaint_id, 'Rework request not found.');
+      const complaint = findComplaint(item.complaint_id);
+      demand(complaint.status === 'Finished', 'This case is no longer Finished.');
+      return transact(() => {
+        run('UPDATE reopen_requests SET status=?,decision_note=?,decided_at=CURRENT_TIMESTAMP WHERE id=?', [decision,note,requestId]);
+        if (decision === 'Approved') {
+          const cycle = one('SELECT * FROM cycles WHERE complaint_id=? ORDER BY number DESC LIMIT 1', [complaint.id]);
+          demand(cycle, 'No resolution cycle found.');
+          run('UPDATE cycles SET reopened_at=CURRENT_TIMESTAMP WHERE id=?', [cycle.id]);
+          run('UPDATE complaints SET closed_at=NULL,finished_at=NULL,escalation_level=0,resolution_due_at=datetime(\'now\',\'+\' || (SELECT resolution_hours FROM categories WHERE id=?) || \' hours\') WHERE id=?', [complaint.category_id,complaint.id]);
+          changeStatus(complaint,user,'Rework approved','Reopened',note);
+        } else log(user.id,complaint.id,'Rework declined',complaint.status,complaint.status,note);
+        run('INSERT INTO notifications (user_id,complaint_id,title,message) VALUES (?,?,?,?)', [item.user_id,complaint.id,`Rework ${decision.toLowerCase()}`,`${complaint.code}: ${note}`]);
+        return true;
+      });
+    },
+    processEscalations() {
+      const cases = all(`SELECT c.id,c.code,c.reporter_id,c.department_id,c.resolution_due_at,c.created_at,c.escalation_level,k.resolution_hours FROM complaints c JOIN categories k ON k.id=c.category_id
+        WHERE c.resolution_due_at IS NOT NULL AND c.escalation_level<2 AND c.status NOT IN ('Closed','Citizen Verified','Finished','Rejected','Duplicate') ORDER BY c.resolution_due_at LIMIT 500`);
+      const now = Date.now(), created = [];
+      transact(() => {
+        for (const c of cases) {
+          const due = Date.parse(`${c.resolution_due_at}Z`);
+          const warn = Math.min(24, c.resolution_hours * 0.25) * 3600000;
+          const stage = now >= due ? 2 : now >= due - warn ? 1 : 0;
+          if (stage <= c.escalation_level) continue;
+          const label = stage === 2 ? 'Overdue' : 'Due soon';
+          const message = stage === 2 ? `${c.code} passed its resolution deadline. Administrators must review and act.` : `${c.code} is approaching its resolution deadline.`;
+          run('INSERT INTO escalation_events (complaint_id,stage,message) VALUES (?,?,?)', [c.id,label,message]);
+          const recipients = stage === 2 ? all("SELECT id FROM users WHERE role IN ('admin','superadmin') AND active=1")
+            : c.department_id ? all("SELECT id FROM users WHERE role='staff' AND department_id=? AND active=1", [c.department_id]) : all("SELECT id FROM users WHERE role IN ('admin','superadmin') AND active=1");
+          for (const recipient of recipients) {
+            run('INSERT INTO notifications (user_id,complaint_id,title,message) VALUES (?,?,?,?)', [recipient.id,c.id,label,message]);
+            created.push({ userId: recipient.id, complaintId: c.id, title: label, message });
+          }
+          run('UPDATE complaints SET escalation_level=? WHERE id=?', [stage,c.id]);
+        }
+      });
+      return created;
     },
     readNotification(user, payload) {
       demand(user, 'Please sign in.');
@@ -493,9 +594,9 @@ function createStore(adapter, options = {}) {
           demand(complaint.status === 'In Progress', 'Only work in progress can be resolved.');
           demand(note.length >= 5, 'Describe the completed work.');
           const image = payload.image || null;
-          demand(!image || (typeof image === 'string' && /^data:image\/(png|jpeg|webp);base64,/.test(image) && image.length < 600000), 'Completion image is too large after optimization.');
+          demand(image && typeof image === 'string' && /^data:image\/(png|jpeg|webp);base64,/.test(image) && image.length < 600000, 'Attach a completion photo before marking work complete.');
           const next = (one('SELECT MAX(number) AS n FROM cycles WHERE complaint_id=?', [complaint.id]).n || 0) + 1;
-          run('INSERT INTO cycles (complaint_id,number) VALUES (?,?)', [complaint.id,next]);
+          run('INSERT INTO cycles (complaint_id,number,completion_image,completion_note) VALUES (?,?,?,?)', [complaint.id,next,image,note]);
           run('UPDATE complaints SET completion_image=?, resolved_at=CURRENT_TIMESTAMP WHERE id=?', [image,complaint.id]);
           changeStatus(complaint,user,'Work completed','Awaiting Feedback',note);
           run('INSERT INTO notifications (user_id,complaint_id,title,message) VALUES (?,?,?,?)',
@@ -507,13 +608,14 @@ function createStore(adapter, options = {}) {
           const cycle = one('SELECT * FROM cycles WHERE complaint_id=? ORDER BY number DESC LIMIT 1', [complaint.id]);
           demand(cycle, 'No resolution cycle found.');
           run('UPDATE cycles SET reopened_at=CURRENT_TIMESTAMP WHERE id=?', [cycle.id]);
-          run('UPDATE complaints SET closed_at=NULL WHERE id=?', [complaint.id]);
+          run('UPDATE complaints SET closed_at=NULL,finished_at=NULL,escalation_level=0,resolution_due_at=datetime(\'now\',\'+\' || (SELECT resolution_hours FROM categories WHERE id=?) || \' hours\') WHERE id=?', [complaint.category_id,complaint.id]);
           changeStatus(complaint,user,'Reopened','Reopened',note);
         } else if (action === 'finish') {
           demand(complaint.status === 'Citizen Verified', 'The citizen must confirm the repair before it can be finished.');
           const cycle = one('SELECT * FROM cycles WHERE complaint_id=? ORDER BY number DESC LIMIT 1', [complaint.id]);
           demand(cycle, 'No resolution cycle found.');
           demand(one("SELECT id FROM feedback WHERE cycle_id=? AND user_id=? AND resolution='Yes'", [cycle.id,complaint.reporter_id]), 'Citizen confirmation is required.');
+          run('UPDATE complaints SET finished_at=CURRENT_TIMESTAMP WHERE id=?', [complaint.id]);
           changeStatus(complaint,user,'Moved to finished work','Finished',note);
         } else throw new Error('Unknown action.');
         return true;

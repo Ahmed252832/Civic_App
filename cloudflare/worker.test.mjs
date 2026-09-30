@@ -9,7 +9,7 @@ test('scheduled backup encrypts a restorable offsite archive', async () => {
   const tables = Object.fromEntries(['departments','categories','users','complaints','updates','cycles','feedback','audit'].map(name => [name, []]));
   tables.users.push({ id: 1, email: 'private@example.test' });
   let saved;
-  await worker.scheduled({}, {
+  await worker.scheduled({ scheduledTime: Date.UTC(2026, 8, 30, 18) }, {
     BACKUP_ENCRYPTION_KEY: key,
     BACKUP_BUCKET: { put: async (name, bytes) => { saved = { name, bytes: Buffer.from(bytes) }; } },
     CIVIC_STATE: { idFromName: () => 'test', get: () => ({ fetch: async () => Response.json({ ok: true, data: { format: 'civicpulse-offsite-v1', tables } }) }) }

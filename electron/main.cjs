@@ -91,6 +91,8 @@ app.whenReady().then(async () => {
       switch (method) {
         case 'snapshot': result = database.snapshot(actor); break;
         case 'performance': result = database.performance(actor); break;
+          case 'requestReopen': result = database.requestReopen(actor, payload); break;
+          case 'decideReopen': result = database.decideReopen(actor, payload); break;
         case 'readNotification': result = database.readNotification(actor, payload); break;
         case 'areaSummary': result = database.areaSummary(actor, payload); break;
         case 'listComplaints': result = database.listComplaints(actor, payload); break;

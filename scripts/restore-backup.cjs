@@ -4,8 +4,8 @@ const crypto = require('node:crypto');
 const initSqlJs = require('sql.js');
 const { createDatabase } = require('../electron/database.cjs');
 
-const TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'audit'];
-const REQUIRED_TABLES = TABLES.filter(table => table !== 'notifications');
+const TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'reopen_requests', 'audit'];
+const REQUIRED_TABLES = TABLES.filter(table => !['notifications','escalation_events','reopen_requests'].includes(table));
 const MAX_BACKUP_BYTES = 200 * 1024 * 1024;
 
 function decryptBackup(bytes, passphrase) {
@@ -17,7 +17,7 @@ function decryptBackup(bytes, passphrase) {
   decipher.setAuthTag(body.subarray(body.length - 16));
   const decrypted = Buffer.concat([decipher.update(body.subarray(0, body.length - 16)), decipher.final()]);
   const archive = JSON.parse(decrypted.toString('utf8'));
-  if (archive.format !== 'civicpulse-backup-v1' || !archive.tables || REQUIRED_TABLES.some(table => !Array.isArray(archive.tables[table])) || (archive.tables.notifications && !Array.isArray(archive.tables.notifications))) throw new Error('Backup contents are incomplete.');
+  if (archive.format !== 'civicpulse-backup-v1' || !archive.tables || REQUIRED_TABLES.some(table => !Array.isArray(archive.tables[table])) || TABLES.some(table => archive.tables[table] !== undefined && !Array.isArray(archive.tables[table]))) throw new Error('Backup contents are incomplete.');
   return archive;
 }
 function decryptOffsiteBackup(bytes, keyBase64) {
@@ -28,7 +28,7 @@ function decryptOffsiteBackup(bytes, keyBase64) {
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, bytes.subarray(6, 18));
   decipher.setAuthTag(body.subarray(body.length - 16));
   const archive = JSON.parse(Buffer.concat([decipher.update(body.subarray(0, body.length - 16)), decipher.final()]).toString('utf8'));
-  if (archive.format !== 'civicpulse-offsite-v1' || !archive.tables || REQUIRED_TABLES.some(table => !Array.isArray(archive.tables[table])) || (archive.tables.notifications && !Array.isArray(archive.tables.notifications))) throw new Error('Offsite backup contents are incomplete.');
+  if (archive.format !== 'civicpulse-offsite-v1' || !archive.tables || REQUIRED_TABLES.some(table => !Array.isArray(archive.tables[table])) || TABLES.some(table => archive.tables[table] !== undefined && !Array.isArray(archive.tables[table]))) throw new Error('Offsite backup contents are incomplete.');
   return archive;
 }
 

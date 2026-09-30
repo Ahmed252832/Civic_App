@@ -10,6 +10,81 @@ const { decryptBackup, restoreNew } = require('../scripts/restore-backup.cjs');
 
 const sample = { title: 'Broken crossing at the corner', description: 'Vehicles are swerving around the damaged crossing.', categoryId: 2, area: 'Dhanmondi', latitude: 23.7469, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' };
 
+test('repair evidence, citizen rework review and department scorecard', async () => {
+  const db = await createDatabase(':memory:');
+  try {
+    const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const other = db.register({ name: 'Other Citizen', email: 'other@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    db.manage(owner, { type: 'user', name: 'Road Worker', email: 'staff@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+    const staff = db.login('staff@example.test', 'staff-password-123');
+    const id = db.createComplaint(citizen, sample);
+    db.act(owner, { id, action: 'verify' });
+    db.act(owner, { id, action: 'assign', departmentId: 1 });
+    db.act(staff, { id, action: 'start' });
+    assert.throws(() => db.act(staff, { id, action: 'resolve', note: 'Completed repair.' }), /completion photo/i);
+    db.act(staff, { id, action: 'resolve', note: 'Completed repair.', image: sample.image });
+    const evidence = db.complaintDetail(citizen, { id }).cycles[0];
+    assert.equal(evidence.completion_image, sample.image);
+    assert.equal(evidence.completion_note, 'Completed repair.');
+    db.submitFeedback(citizen, { id, rating: 4, resolution: 'Yes' });
+    db.act(owner, { id, action: 'finish' });
+    assert.throws(() => db.requestReopen(other, { id, reason: 'The repair failed again.' }), /Only the reporter/);
+    const requestId = db.requestReopen(citizen, { id, reason: 'The repaired surface broke again.' });
+    assert.throws(() => db.requestReopen(citizen, { id, reason: 'The repaired surface broke again.' }), /already awaiting/);
+    assert.equal(db.performance(owner).pendingReopenRequests[0].id, requestId);
+    assert.throws(() => db.complaintDetail(other, { id }), /Complaint not found/);
+    db.decideReopen(owner, { requestId, decision: 'Approved', note: 'Return to department for inspection.' });
+    assert.equal(db.complaintDetail(owner, { id }).complaint.status, 'Reopened');
+    assert.equal(db.performance(owner).pendingReopenRequests.length, 0);
+    db.act(owner, { id, action: 'assign', departmentId: 1 });
+    db.act(staff, { id, action: 'start' });
+    db.act(staff, { id, action: 'resolve', note: 'Repaired again after inspection.', image: sample.image });
+    db.submitFeedback(citizen, { id, rating: 5, resolution: 'Yes' });
+    db.act(owner, { id, action: 'finish' });
+    const score = db.performance(owner).departments.find(row => row.id === 1);
+    assert.equal(score.finished, 1);
+    assert.equal(score.rating_count, 2);
+    assert.equal(score.reopened_percent, 100);
+    assert.equal(score.on_time_percent, 100);
+    assert.equal(db.complaintDetail(citizen, { id }).cycles.length, 2);
+  } finally { db.close(); }
+});
+
+test('deadline escalation is recorded once and reaches staff then administrators', async () => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'civicpulse-escalation-'));
+  const file = path.join(folder, 'cases.sqlite');
+  try {
+    let db = await createDatabase(file);
+    const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    db.manage(owner, { type: 'user', name: 'Road Worker', email: 'staff@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+    const staff = db.login('staff@example.test', 'staff-password-123');
+    const id = db.createComplaint(citizen, sample);
+    db.act(owner, { id, action: 'verify' });
+    db.act(owner, { id, action: 'assign', departmentId: 1 });
+    db.close();
+    const SQL = await initSqlJs({ locateFile: () => require.resolve('sql.js/dist/sql-wasm.wasm') });
+    let raw = new SQL.Database(fs.readFileSync(file));
+    raw.run("UPDATE complaints SET resolution_due_at=datetime('now','+1 hour') WHERE id=?", [id]);
+    fs.writeFileSync(file, Buffer.from(raw.export())); raw.close();
+    db = await createDatabase(file);
+    assert.equal(db.processEscalations().length, 1);
+    assert.equal(db.processEscalations().length, 0);
+    assert.match(db.snapshot(staff).notifications[0].title, /Due soon/);
+    db.close();
+    raw = new SQL.Database(fs.readFileSync(file));
+    raw.run("UPDATE complaints SET resolution_due_at=datetime('now','-1 hour') WHERE id=?", [id]);
+    fs.writeFileSync(file, Buffer.from(raw.export())); raw.close();
+    db = await createDatabase(file);
+    assert.equal(db.processEscalations().length, 1);
+    assert.equal(db.processEscalations().length, 0);
+    assert.match(db.snapshot(owner).notifications[0].title, /Overdue/);
+    assert.equal(db.complaintDetail(owner, { id }).escalationEvents.length, 2);
+    db.close();
+  } finally { fs.rmSync(folder, { recursive: true, force: true }); }
+});
+
 test('closure targets and recurring issues keep other reporter details private', async () => {
   const db = await createDatabase(':memory:');
   try {
@@ -28,7 +103,7 @@ test('closure targets and recurring issues keep other reporter details private',
     assert.ok(staff);
     const worker = db.login('staff@example.test', 'staff-password-123');
     db.act(worker, { id: originalId, action: 'start' });
-    db.act(worker, { id: originalId, action: 'resolve', note: 'Crossing repaired and inspected.' });
+    db.act(worker, { id: originalId, action: 'resolve', note: 'Crossing repaired and inspected.', image: sample.image });
     const alert = db.snapshot(firstReporter).notifications[0];
     assert.match(alert.message, /give a rating/);
     assert.equal(db.snapshot(nextReporter).notifications.length, 0);
@@ -108,14 +183,14 @@ test('unconfirmed work cannot be finished and a new repair cycle needs fresh con
     db.act(owner, { id, action: 'verify' });
     db.act(owner, { id, action: 'assign', departmentId: 1 });
     db.act(worker, { id, action: 'start' });
-    db.act(worker, { id, action: 'resolve', note: 'First repair attempt completed.' });
+    db.act(worker, { id, action: 'resolve', note: 'First repair attempt completed.', image: sample.image });
     db.submitFeedback(citizen, { id, rating: 2, resolution: 'Partially', comment: 'Damage remains.' });
     assert.equal(db.complaintDetail(owner, { id }).complaint.status, 'Awaiting Feedback');
     assert.throws(() => db.act(owner, { id, action: 'finish' }), /citizen must confirm/i);
     assert.equal(db.performance(owner).departments.find(row => row.id === 1).finished, 0);
     db.act(owner, { id, action: 'reopen', note: 'Redo the incomplete repair.' });
     db.act(worker, { id, action: 'start' });
-    db.act(worker, { id, action: 'resolve', note: 'Second repair completed and inspected.' });
+    db.act(worker, { id, action: 'resolve', note: 'Second repair completed and inspected.', image: sample.image });
     assert.equal(db.snapshot(citizen).notifications.length, 2);
     db.submitFeedback(citizen, { id, rating: 4, resolution: 'Yes', comment: 'Now fixed.' });
     db.act(owner, { id, action: 'finish' });
@@ -126,7 +201,7 @@ test('unconfirmed work cannot be finished and a new repair cycle needs fresh con
   } finally { db.close(); }
 });
 
-test('overdue closure filters clear on confirmation and return on reopening', async () => {
+test('overdue closure filters clear on confirmation and a rework gets a new deadline', async () => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'civicpulse-deadline-'));
   const file = path.join(folder, 'cases.sqlite');
   try {
@@ -148,13 +223,14 @@ test('overdue closure filters clear on confirmation and return on reopening', as
       reopened.manage(owner, { type: 'user', name: 'Road Worker', email: 'staff@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
       const staff = reopened.login('staff@example.test', 'staff-password-123');
       reopened.act(staff, { id: reportId, action: 'start' });
-      reopened.act(staff, { id: reportId, action: 'resolve', note: 'The repair has been completed.' });
+      reopened.act(staff, { id: reportId, action: 'resolve', note: 'The repair has been completed.', image: sample.image });
       reopened.submitFeedback(citizen, { id: reportId, rating: 5, resolution: 'Yes' });
       assert.equal(reopened.summary(owner).counts.overdue_closure, 0);
       assert.equal(reopened.listComplaints(owner, { scope: 'Overdue closure' }).total, 0);
       reopened.act(owner, { id: reportId, action: 'reopen', note: 'The repair failed on inspection.' });
-      assert.equal(reopened.summary(owner).counts.overdue_closure, 1);
+      assert.equal(reopened.summary(owner).counts.overdue_closure, 0);
       assert.equal(reopened.complaintDetail(owner, { id: reportId }).complaint.closed_at, null);
+      assert.ok(reopened.complaintDetail(owner, { id: reportId }).complaint.resolution_due_at > reopened.complaintDetail(owner, { id: reportId }).complaint.updated_at);
     } finally { reopened.close(); }
   } finally { fs.rmSync(folder, { recursive: true, force: true }); }
 });
@@ -218,7 +294,7 @@ test('clean setup, private reports, department scope and account controls', asyn
     assert.throws(() => db.act(staff, { id, action: 'start' }), /another department/);
     db.act(admin, { id, action: 'assign', departmentId: 1 });
     db.act(staff, { id, action: 'start' });
-    db.act(staff, { id, action: 'resolve', note: 'Crossing surface repaired.' });
+    db.act(staff, { id, action: 'resolve', note: 'Crossing surface repaired.', image: sample.image });
     assert.throws(() => db.submitFeedback(neighbor, { id, rating: 5, resolution: 'Yes' }), /own report/);
     db.submitFeedback(citizen, { id, rating: 5, resolution: 'Yes', comment: 'Repair confirmed' });
     assert.equal(db.snapshot(citizen).feedback[0].comment, 'Repair confirmed');
@@ -274,7 +350,7 @@ test('owner backup requires password, pages complete data, and restores a checke
     db.manage(owner, { type: 'user', name: 'Road Worker', email: 'road@backup.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
     const worker = db.login('road@backup.test', 'staff-password-123');
     db.act(worker, { id: firstId, action: 'start' });
-    db.act(worker, { id: firstId, action: 'resolve', note: 'The damaged area was repaired.' });
+    db.act(worker, { id: firstId, action: 'resolve', note: 'The damaged area was repaired.', image: sample.image });
     assert.throws(() => db.beginBackup(citizen, { password: 'citizen-password-123' }), /permission/);
     assert.throws(() => db.beginBackup(owner, { password: 'wrong' }), /Invalid password/);
     const access = db.beginBackup(owner, { password: 'owner-secret-password' });

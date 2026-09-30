@@ -1,7 +1,7 @@
 {
   "name": "civicpulse-desktop",
   "private": true,
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Connected Dhaka civic complaint desktop and web app",
   "main": "electron/main.cjs",
   "scripts": {
@@ -17,9 +17,11 @@
     "test": "node --test electron/database.test.cjs server/web.test.cjs cloudflare/worker.test.mjs",
     "smoke": "node electron/ui-smoke.cjs",
     "smoke:cloud": "node electron/cloud-smoke.cjs",
+    "smoke:mobile": "node scripts/mobile-smoke.cjs",
     "smoke:package": "node electron/packaged-smoke.cjs"
   },
   "dependencies": {
+    "@mmmike/web-push": "^1.3.0",
     "leaflet": "^1.9.4",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
