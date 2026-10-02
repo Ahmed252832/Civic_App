@@ -101,6 +101,7 @@ app.whenReady().then(async () => {
         case 'complaintDetail': result = database.complaintDetail(actor, payload); break;
         case 'caseMessage': result = database.postCaseMessage(actor, payload); break;
         case 'nearby': result = database.nearby(actor, payload); break;
+        case 'nearbyIssues': result = database.nearbyIssues(actor, payload); break;
         case 'create':
           result = database.createComplaint(actor, payload);
           notify(`Your report C-${1000 + result} was submitted.`);
@@ -120,6 +121,8 @@ app.whenReady().then(async () => {
         case 'decidePrivacyRemoval': result = database.decidePrivacyRemoval(actor, payload); if (result.approved && currentUserId === result.userId) currentUserId = null; break;
         case 'retentionPreview': result = database.retentionPreview(actor, payload); break;
         case 'applyRetention': result = database.applyRetention(actor, payload); break;
+        case 'complaintPurgePreview': result = database.complaintPurgePreview(actor); break;
+        case 'purgeComplaints': result = database.purgeComplaints(actor, payload); break;
         case 'requestVerification': throw new Error('Email verification is available only on the hosted site when a mail provider is configured.');
         case 'beginBackup': result = database.beginBackup(actor, payload); break;
         case 'backupPage': result = database.backupPage(actor, payload); break;

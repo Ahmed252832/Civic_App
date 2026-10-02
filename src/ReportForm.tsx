@@ -37,6 +37,20 @@ export default function ReportForm({ data, onCreated, showError, turnstileSiteKe
   const [draftFailed, setDraftFailed] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState('');
   const [challengeVersion, setChallengeVersion] = useState(0);
+  const [locationNotice, setLocationNotice] = useState('');
+
+  useEffect(() => {
+    if (startPoint || !navigator.geolocation) return;
+    let active = true;
+    navigator.geolocation.getCurrentPosition(({ coords }) => {
+      if (!active) return;
+      const next = { latitude: coords.latitude, longitude: coords.longitude };
+      if (!inDhakaMap(next)) return;
+      setPoint(next); setLatitudeText(next.latitude.toFixed(6)); setLongitudeText(next.longitude.toFixed(6));
+      setLocationNotice(language === 'bn' ? 'আপনার বর্তমান অবস্থান পিন করা হয়েছে। অভিযোগের স্থান ও ওয়ার্ড যাচাই করুন।' : 'Your current location was pinned. Check the issue location and ward before submitting.');
+    }, () => {}, { enableHighAccuracy: true, timeout: 12000, maximumAge: 120000 });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     const update = () => setOnline(navigator.onLine);
@@ -102,7 +116,10 @@ export default function ReportForm({ data, onCreated, showError, turnstileSiteKe
         <label>{t('Severity')}<select value={severity} onChange={event => setSeverity(event.target.value)}>{['Low','Medium','High','Critical'].map(value => <option value={value} key={value}>{t(value)}</option>)}</select></label>
         <label className="wide">{t('Your ward')}<select value={wardCode} onChange={event => setWardCode(event.target.value)} required><option value="">{t('Choose ward')}</option>{['DNCC','DSCC'].map(corporation => <optgroup key={corporation} label={corporation === 'DNCC' ? t('Dhaka North') : t('Dhaka South')}>{wardOptions.filter(item => item.corporation === corporation).map(item => <option key={item.code} value={item.code}>{wardLabel(item.code, language)}</option>)}</optgroup>)}</select></label>
       </div>
-      <p className="method-note">{language === 'bn' ? 'ওয়ার্ডটি নিজে যাচাই করে বাছুন; মানচিত্র থেকে ওয়ার্ড স্বয়ংক্রিয়ভাবে নির্ধারিত হয় না।' : 'Confirm the ward yourself; the map does not automatically verify ward boundaries.'}</p>
+      <p className="method-note">{language === 'bn' ? 'আপনার অ্যাকাউন্টের ওয়ার্ড আগে থেকেই বাছা আছে। সমস্যাটি অন্য ওয়ার্ডে হলে বদলান; সঠিক ওয়ার্ডের সীমানা এখনো স্বয়ংক্রিয়ভাবে যাচাই করা যায় না।' : 'Your account ward is preselected. Change it if the issue is in another ward; ward boundaries cannot yet be verified automatically.'}</p>
+      <div className="ward-guide-links"><a href="/ward-guides/dncc-areas.txt" target="_blank" rel="noreferrer">{language === 'bn' ? 'ঢাকা উত্তরের ওয়ার্ড ও এলাকা দেখুন' : 'North ward and area guide'}</a><a href="/ward-guides/dscc-areas.pdf" target="_blank" rel="noreferrer">{language === 'bn' ? 'ঢাকা দক্ষিণের ওয়ার্ড ও এলাকা দেখুন' : 'South ward and area guide'}</a></div>
+      <p className="method-note">{language === 'bn' ? 'এই তালিকাগুলো পুরোনো হতে পারে। সীমান্তবর্তী জায়গায় সিটি কর্পোরেশনের বর্তমান তথ্য মিলিয়ে নিন।' : 'These source lists may be dated. Check current city corporation guidance for boundary locations.'}</p>
+      {locationNotice && <p className="method-note" role="status">{locationNotice}</p>}
       {categoryId > 0 && <p className="target-preview">{language === 'bn' ? 'এই ধরনের অভিযোগের লক্ষ্য সময়' : 'Closure target for this category'}: {data.categories.find(item => item.id === categoryId)?.resolution_hours || 168} {language === 'bn' ? 'ঘণ্টা' : 'hours'}.</p>}
       <div className="form-intro middle"><span className="step">02</span><div><h3>{t('Pin the exact location')}</h3><p>{t('Choose on map or enter coordinates using a keyboard.')}</p></div></div>
       <LocationPicker value={point} onPick={(latitude, longitude) => setCoordinates(latitude.toFixed(6), longitude.toFixed(6))} />

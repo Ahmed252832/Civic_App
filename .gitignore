@@ -19,3 +19,4 @@ data/
 tsconfig.tsbuildinfo
 .wrangler/
 cloudflare/dry-run/
+tmp/

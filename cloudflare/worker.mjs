@@ -273,6 +273,11 @@ export class CivicState {
         this.rateLimit(request, 'retention', 5);
         return json(200, { ok: true, data: this.store.applyRetention(user, payload) });
       }
+      if (method === 'complaintPurgePreview') return json(200, { ok: true, data: this.store.complaintPurgePreview(user) });
+      if (method === 'purgeComplaints') {
+        this.rateLimit(request, 'purge-complaints', 3);
+        return json(200, { ok: true, data: this.store.purgeComplaints(user, payload) });
+      }
       if (method === 'create' && user.role === 'citizen' && mailReady(this.env) && !user.emailVerified) throw new Error('Verify your email before submitting a complaint. Open Account security to resend the link.');
       const notificationsBefore = this.state.storage.sql.exec('SELECT COALESCE(MAX(id),0) AS id FROM notifications').toArray()[0].id;
       let data;
@@ -289,6 +294,7 @@ export class CivicState {
         case 'complaintDetail': data = this.store.complaintDetail(user, payload); break;
         case 'caseMessage': this.rateLimit(request, 'case-message', 40); data = this.store.postCaseMessage(user, payload); break;
         case 'nearby': data = this.store.nearby(user, payload); break;
+        case 'nearbyIssues': data = this.store.nearbyIssues(user, payload); break;
         case 'create': this.rateLimit(request, 'complaint', 8); await verifyTurnstile(this.env, payload.turnstileToken, request.headers.get('x-civic-ip')); data = this.store.createComplaint(user, payload); break;
         case 'action': data = this.store.act(user, payload); break;
         case 'feedback': this.rateLimit(request, 'feedback', 20); data = this.store.submitFeedback(user, payload); break;

@@ -32,6 +32,8 @@ test('web API protects reports and revokes disabled staff sessions', async () =>
     assert.equal((await call('snapshot', {}, neighbor.cookie)).body.data.complaints.length, 0);
     assert.equal((await call('listComplaints', {}, neighbor.cookie)).body.data.complaints.length, 0);
     assert.equal((await call('complaintDetail', { id }, neighbor.cookie)).body.ok, false);
+    assert.equal((await call('nearbyIssues', { latitude: 23.7468, longitude: 90.3754 }, neighbor.cookie)).body.data.length, 0);
+    assert.equal((await call('nearbyIssues', { latitude: 23.7468, longitude: 90.3754 }, owner.cookie)).body.data.length, 1);
     assert.equal((await call('action', { id, action: 'verify' }, citizen.cookie)).response.status, 403);
     await call('manage', { type: 'user', name: 'Service Admin', email: 'admin@example.test', password: 'admin-password-123', role: 'admin' }, owner.cookie);
     await call('manage', { type: 'user', name: 'Road Worker', email: 'staff@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 }, owner.cookie);
@@ -73,6 +75,11 @@ test('web API protects reports and revokes disabled staff sessions', async () =>
     assert.equal((await call('recoverWithCode', { code: code.body.data, newPassword: 'code-recovered-password-123' })).body.ok, true);
     assert.equal((await call('session', {}, recovered.cookie)).body.data, null);
     assert.match(complaintCsv([{ code: 'C-9', title: '=HYPERLINK("x")', category: 'Other', area: 'DNCC Ward 15', severity: 'Low', priority: 'Normal', status: 'Submitted' }]), /'=HYPERLINK/);
+    assert.equal((await call('complaintPurgePreview', {}, neighbor.cookie)).body.ok, false);
+    assert.equal((await call('purgeComplaints', { password: 'owner-secret-password', confirm: 'DELETE COMPLAINTS' }, neighbor.cookie)).body.ok, false);
+    assert.equal((await call('purgeComplaints', { password: 'owner-secret-password', confirm: 'DELETE COMPLAINTS' }, owner.cookie)).body.data.complaints, 1);
+    assert.equal((await call('complaintPurgePreview', {}, owner.cookie)).body.data.complaints, 0);
+    assert.equal((await call('session', {}, owner.cookie)).body.data.role, 'superadmin');
   } finally {
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));

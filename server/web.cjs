@@ -151,6 +151,8 @@ async function createWebServer(options = {}) {
         }
         if (method === 'retentionPreview') return sendJson(res, 200, { ok: true, data: database.retentionPreview(actor, payload) });
         if (method === 'applyRetention') return sendJson(res, 200, { ok: true, data: database.applyRetention(actor, payload) });
+        if (method === 'complaintPurgePreview') return sendJson(res, 200, { ok: true, data: database.complaintPurgePreview(actor) });
+        if (method === 'purgeComplaints') return sendJson(res, 200, { ok: true, data: database.purgeComplaints(actor, payload) });
         let result;
         switch (method) {
           case 'snapshot': result = database.snapshot(actor); break;
@@ -165,6 +167,7 @@ async function createWebServer(options = {}) {
           case 'complaintDetail': result = database.complaintDetail(actor, payload); break;
           case 'caseMessage': result = database.postCaseMessage(actor, payload); break;
           case 'nearby': result = database.nearby(actor, payload); break;
+          case 'nearbyIssues': result = database.nearbyIssues(actor, payload); break;
           case 'create': result = database.createComplaint(actor, payload); break;
           case 'action': result = database.act(actor, payload); break;
           case 'feedback': result = database.submitFeedback(actor, payload); break;

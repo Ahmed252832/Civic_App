@@ -162,6 +162,7 @@ function createStore(adapter, options = {}) {
   run('CREATE INDEX IF NOT EXISTS complaints_resolution_due ON complaints(closed_at,resolution_due_at)');
   run('CREATE INDEX IF NOT EXISTS complaints_recurrence_of ON complaints(recurrence_of)');
   run('CREATE INDEX IF NOT EXISTS complaints_category_resolution ON complaints(category_id,status,resolved_at)');
+  run('CREATE INDEX IF NOT EXISTS complaints_geo ON complaints(latitude,longitude)');
   run('CREATE INDEX IF NOT EXISTS updates_complaint_id ON updates(complaint_id,id)');
   run('CREATE INDEX IF NOT EXISTS feedback_complaint_id ON feedback(complaint_id,id)');
   run('CREATE INDEX IF NOT EXISTS notifications_user_id ON notifications(user_id,id)');
@@ -435,6 +436,19 @@ function createStore(adapter, options = {}) {
       if (scope === 'Recurring issues' && ['admin','superadmin'].includes(user.role)) where.push('c.recurrence_of IS NOT NULL');
       if (scope === 'Citizen verified' && ['admin','superadmin'].includes(user.role)) where.push("c.status='Citizen Verified'");
       if (scope === 'Finished work' && ['admin','superadmin'].includes(user.role)) where.push("c.status='Finished'");
+      if (scope === 'Total reports' && user.role === 'staff') { where.push('c.department_id=?'); params.push(user.departmentId || -1); }
+      if (scope === 'Awaiting review' && user.role === 'citizen') where.push("c.status='Submitted'");
+      if (scope === 'Open issues' || scope === 'Still open') {
+        where.push("c.status NOT IN ('Closed','Citizen Verified','Finished','Rejected','Duplicate')");
+        if (user.role === 'staff') { where.push('c.department_id=?'); params.push(user.departmentId || -1); }
+      }
+      if (scope === 'Resolved' || scope === 'Completed') {
+        where.push("c.status IN ('Awaiting Feedback','Citizen Verified','Finished','Closed')");
+        if (user.role === 'staff') { where.push('c.department_id=?'); params.push(user.departmentId || -1); }
+      }
+      if (scope === 'Finished / legacy closed') where.push("c.status IN ('Closed','Finished')");
+      if (scope === 'Critical alerts') where.push("c.severity='Critical' AND c.status NOT IN ('Closed','Citizen Verified','Finished','Rejected','Duplicate')");
+      if (scope === 'Repair cycles reopened') where.push("c.status='Reopened'");
       if (status && status !== 'All statuses') { where.push('c.status=?'); params.push(status); }
       if (wardCode) { demand(validWard(wardCode), 'Choose a valid ward.'); where.push('c.ward_code=?'); params.push(wardCode); }
       if (search) { where.push('(c.code LIKE ? OR c.title LIKE ? OR c.area LIKE ? OR k.name LIKE ?)'); params.push(...Array(4).fill(`%${search}%`)); }
@@ -699,6 +713,45 @@ function createStore(adapter, options = {}) {
         .map(item => ({ ...item, distance: Math.round(haversineMeters({ latitude: lat, longitude: lon }, item)) }))
         .filter(item => item.distance <= 200).sort((a,b) => a.distance - b.distance).slice(0, 5)
         .map(({ latitude, longitude, ...item }) => item);
+    },
+    nearbyIssues(user, payload) {
+      demand(user, 'Please sign in.');
+      const latitude = Number(payload.latitude), longitude = Number(payload.longitude);
+      demand(Number.isFinite(latitude) && Number.isFinite(longitude) && inDhaka(latitude, longitude), 'Choose a location inside the Dhaka service area.');
+      const wardCode = safeText(payload.wardCode, 7);
+      if (wardCode) demand(validWard(wardCode), 'Choose a valid ward.');
+      const access = visibility(user);
+      const latitudeSpan = 2 / 111;
+      const longitudeSpan = 2 / (111 * Math.cos(latitude * Math.PI / 180));
+      const where = [access.sql, 'c.latitude BETWEEN ? AND ?', 'c.longitude BETWEEN ? AND ?'];
+      const params = [...access.params, latitude - latitudeSpan, latitude + latitudeSpan, longitude - longitudeSpan, longitude + longitudeSpan];
+      if (wardCode) { where.push('c.ward_code=?'); params.push(wardCode); }
+      const rows = all(`SELECT c.id,c.code,c.title,c.status,c.area,c.ward_code,c.department_id,c.reporter_id,c.latitude,c.longitude,k.name AS category
+        FROM complaints c JOIN categories k ON k.id=c.category_id WHERE ${where.join(' AND ')}`, params);
+      return rows.map(row => ({ row, distance: Math.round(haversineMeters({ latitude, longitude }, row)) }))
+        .filter(item => item.distance <= 2000).sort((a,b) => a.distance - b.distance).slice(0, 50)
+        .map(({ row, distance }) => { const safe = safeCase(user, row); return { id: safe.id, code: safe.code, title: safe.title, status: safe.status,
+          area: safe.area, ward_code: safe.ward_code, category: safe.category, distance }; });
+    },
+    complaintPurgePreview(user) {
+      requireRole(user, ['superadmin']);
+      return one('SELECT COUNT(*) AS complaints FROM complaints');
+    },
+    purgeComplaints(user, payload) {
+      requireRole(user, ['superadmin']);
+      demand(payload.confirm === 'DELETE COMPLAINTS', 'Type DELETE COMPLAINTS to confirm.');
+      const saved = one('SELECT password_hash FROM users WHERE id=? AND active=1', [user.id]);
+      demand(saved && typeof payload.password === 'string' && payload.password.length <= 128 && verifyPassword(payload.password, saved.password_hash), 'Current password is incorrect.');
+      return transact(() => {
+        const count = one('SELECT COUNT(*) AS n FROM complaints').n;
+        for (const table of ['case_messages','notifications','feedback','updates','escalation_events','reopen_requests','cycles']) run(`DELETE FROM ${table}`);
+        run('UPDATE complaints SET duplicate_of=NULL, recurrence_of=NULL');
+        run('DELETE FROM complaints');
+        run('DELETE FROM area_counts');
+        run("DELETE FROM audit WHERE target_type='complaint' OR target_type='retention'");
+        run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Purged complaints','system',0,`${count} complaints and related history removed`]);
+        return { complaints: count };
+      });
     },
     createComplaint(user, payload) {
       requireRole(user, ['citizen']);

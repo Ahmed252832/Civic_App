@@ -29,6 +29,12 @@ function FocusPoint({ point, zoom }: { point: MapPoint | null; zoom: number }) {
   return null;
 }
 
+function FocusRegion({ point }: { point: MapPoint | null }) {
+  const map = useMap();
+  useEffect(() => { if (point) map.flyTo([point.latitude, point.longitude], 13, { duration: .65 }); }, [map, point]);
+  return null;
+}
+
 export function LocationPicker({ value, onPick }: { value: MapPoint | null; onPick: (latitude: number, longitude: number) => void }) {
   const { language } = useLocale();
   return <div className="map-frame picker-map" role="group" aria-label={language === 'bn' ? 'অবস্থান বাছার মানচিত্র' : 'Choose report location on map'}><MapContainer center={value ? [value.latitude, value.longitude] : center} zoom={value ? 17 : 12} minZoom={11} maxBounds={dhakaBounds} maxBoundsViscosity={1} scrollWheelZoom={false}>
@@ -51,7 +57,7 @@ function IssueMarker({ complaint, onOpen }: { complaint: PublicComplaint; onOpen
   </CircleMarker>;
 }
 
-export function IssueMap({ complaints, mode, onOpen, draftPin, onPick }: { complaints: PublicComplaint[]; mode: 'markers' | 'heat'; onOpen: (id: number) => void; draftPin?: MapPoint | null; onPick?: (point: MapPoint) => void }) {
+export function IssueMap({ complaints, mode, onOpen, draftPin, onPick, regionFocus }: { complaints: PublicComplaint[]; mode: 'markers' | 'heat'; onOpen: (id: number) => void; draftPin?: MapPoint | null; onPick?: (point: MapPoint) => void; regionFocus?: MapPoint | null }) {
   const { language } = useLocale();
   const clusters = useMemo(() => {
     const cells = new Map<string, { latitude: number; longitude: number; count: number }>();
@@ -66,11 +72,12 @@ export function IssueMap({ complaints, mode, onOpen, draftPin, onPick }: { compl
   return <div className="map-frame overview-map" role="group" aria-label={language === 'bn' ? 'অভিযোগের মানচিত্র' : 'Issue map'}><MapContainer center={center} zoom={12} minZoom={11} maxBounds={dhakaBounds} maxBoundsViscosity={1} scrollWheelZoom={true}>
     <TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" />
     {onPick && <ClickHandler onPick={onPick} />}
+    <FocusRegion point={regionFocus || null} />
     <FocusPoint point={draftPin || null} zoom={17} />
     {draftPin && <CircleMarker center={[draftPin.latitude, draftPin.longitude]} radius={11} bubblingMouseEvents={false} pathOptions={{ color: '#ffffff', weight: 3, fillColor: '#20bfa3', fillOpacity: 1 }}><Tooltip permanent direction="top">{language === 'bn' ? 'নতুন অভিযোগের স্থান' : 'New report pin'}</Tooltip></CircleMarker>}
     {mode === 'markers' ? complaints.map(c => <IssueMarker key={c.id} complaint={c} onOpen={onOpen} />) : clusters.map((cluster, index) => <Circle key={index} center={[cluster.latitude, cluster.longitude]}
       radius={Math.min(500, 180 + cluster.count * 75)} pathOptions={{ color: cluster.count >= 3 ? '#ff796e' : cluster.count === 2 ? '#ffa85f' : '#ffce75', weight: 1, fillOpacity: Math.min(.65, .22 + cluster.count * .12) }}>
-      <Tooltip>{cluster.count} {cluster.count === 1 ? 'complaint' : 'complaints'} nearby</Tooltip>
+      <Tooltip>{language === 'bn' ? `কাছাকাছি ${cluster.count}টি অভিযোগ` : `${cluster.count} ${cluster.count === 1 ? 'complaint' : 'complaints'} nearby`}</Tooltip>
     </Circle>)}
   </MapContainer><span className="map-hint">{onPick ? (language === 'bn' ? 'মানচিত্রে ক্লিক করুন অথবা উপরে স্থানাঙ্ক লিখুন' : 'Click the map or enter coordinates above') : mode === 'markers' ? (language === 'bn' ? 'অভিযোগের চিহ্নে ক্লিক করলে স্থানটি বড় হবে' : 'Click a report pin to zoom to its location') : `${clusters.length} ${language === 'bn' ? 'ভৌগোলিক গুচ্ছ' : 'geographic clusters'}`}</span></div>;
 }

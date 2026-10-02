@@ -10,6 +10,45 @@ const { decryptBackup, restoreNew } = require('../scripts/restore-backup.cjs');
 
 const sample = { title: 'Broken crossing at the corner', description: 'Vehicles are swerving around the damaged crossing.', categoryId: 2, area: 'DNCC Ward 15', wardCode: 'DNCC-15', placeName: 'Dhanmondi Lake east gate', latitude: 23.7469, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' };
 
+test('nearby issues stay within 2 km and complaint reset preserves accounts and services', async () => {
+  const db = await createDatabase(':memory:');
+  try {
+    const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    const neighbor = db.register({ name: 'Second Citizen', email: 'second@example.test', area: 'DNCC Ward 16', password: 'citizen-password-123' });
+    db.manage(owner, { type: 'user', name: 'Road Worker', email: 'roads@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+    db.manage(owner, { type: 'user', name: 'Waste Worker', email: 'waste@example.test', password: 'staff-password-123', role: 'staff', departmentId: 2 });
+    const road = db.login('roads@example.test', 'staff-password-123');
+    const waste = db.login('waste@example.test', 'staff-password-123');
+    const first = db.createComplaint(citizen, sample);
+    const second = db.createComplaint(neighbor, { ...sample, title: 'Waste blocking the crossing', categoryId: 3, wardCode: 'DNCC-16', latitude: 23.7472, longitude: 90.3754 });
+    db.postCaseMessage(citizen, { id: first, body: 'A private case message' });
+    assert.equal(db.nearbyIssues(citizen, { latitude: sample.latitude, longitude: sample.longitude }).length, 1);
+    assert.equal(db.nearbyIssues(owner, { latitude: sample.latitude, longitude: sample.longitude }).length, 2);
+    assert.equal(db.nearbyIssues(owner, { latitude: sample.latitude, longitude: sample.longitude, wardCode: 'DNCC-15' }).length, 1);
+    assert.equal(db.nearbyIssues(owner, { latitude: 23.78, longitude: sample.longitude }).length, 0);
+    assert.equal(db.nearbyIssues(road, { latitude: sample.latitude, longitude: sample.longitude }).length, 0);
+    db.act(owner, { id: first, action: 'verify' }); db.act(owner, { id: first, action: 'assign', departmentId: 1 });
+    assert.equal(db.nearbyIssues(road, { latitude: sample.latitude, longitude: sample.longitude }).length, 1);
+    const publicCase = db.nearbyIssues(waste, { latitude: sample.latitude, longitude: sample.longitude }).find(item => item.id === first);
+    assert.ok(publicCase);
+    assert.equal('place_name' in publicCase, false);
+    assert.throws(() => db.purgeComplaints(citizen, { password: 'citizen-password-123', confirm: 'DELETE COMPLAINTS' }), /permission/);
+    assert.throws(() => db.purgeComplaints(owner, { password: 'wrong', confirm: 'DELETE COMPLAINTS' }), /password/);
+    assert.throws(() => db.purgeComplaints(owner, { password: 'owner-secret-password', confirm: 'wrong' }), /DELETE COMPLAINTS/);
+    assert.equal(db.complaintPurgePreview(owner).complaints, 2);
+    assert.equal(db.purgeComplaints(owner, { password: 'owner-secret-password', confirm: 'DELETE COMPLAINTS' }).complaints, 2);
+    assert.equal(db.complaintPurgePreview(owner).complaints, 0);
+    assert.equal(db.automaticBackupData().tables.case_messages.length, 0);
+    assert.equal(db.automaticBackupData().tables.updates.length, 0);
+    assert.equal(db.login('first@example.test', 'citizen-password-123').id, citizen.id);
+    assert.ok(db.snapshot(owner).departments.length >= 4);
+    assert.ok(db.snapshot(owner).categories.length >= 9);
+    assert.ok(db.snapshot(owner).audit.some(item => item.action === 'Purged complaints'));
+    assert.equal(second > first, true);
+  } finally { db.close(); }
+});
+
 test('ward queues and private case conversation respect account access', async () => {
   const db = await createDatabase(':memory:');
   try {
