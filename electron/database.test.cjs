@@ -8,13 +8,48 @@ const os = require('node:os');
 const path = require('node:path');
 const { decryptBackup, restoreNew } = require('../scripts/restore-backup.cjs');
 
-const sample = { title: 'Broken crossing at the corner', description: 'Vehicles are swerving around the damaged crossing.', categoryId: 2, area: 'Dhanmondi', placeName: 'Dhanmondi Lake east gate', latitude: 23.7469, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' };
+const sample = { title: 'Broken crossing at the corner', description: 'Vehicles are swerving around the damaged crossing.', categoryId: 2, area: 'DNCC Ward 15', wardCode: 'DNCC-15', placeName: 'Dhanmondi Lake east gate', latitude: 23.7469, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' };
+
+test('ward queues and private case conversation respect account access', async () => {
+  const db = await createDatabase(':memory:');
+  try {
+    const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    const otherCitizen = db.register({ name: 'Other Citizen', email: 'other@example.test', area: 'DNCC Ward 16', password: 'citizen-password-123' });
+    db.manage(owner, { type: 'user', name: 'Road Worker', email: 'roads@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+    db.manage(owner, { type: 'user', name: 'Waste Worker', email: 'waste@example.test', password: 'staff-password-123', role: 'staff', departmentId: 2 });
+    const road = db.login('roads@example.test', 'staff-password-123');
+    const waste = db.login('waste@example.test', 'staff-password-123');
+    assert.throws(() => db.createComplaint(citizen, { ...sample, wardCode: 'DNCC-55' }), /ward/);
+    const id = db.createComplaint(citizen, { ...sample, area: 'untrusted area' });
+    assert.equal(db.complaintDetail(citizen, { id }).complaint.area, 'DNCC Ward 15');
+    assert.equal(db.listComplaints(citizen, { wardCode: 'DNCC-15' }).total, 1);
+    assert.equal(db.listComplaints(otherCitizen, { wardCode: 'DNCC-15' }).total, 0);
+    assert.equal(db.wardSummary(owner).find(item => item.code === 'DNCC-15').total, 1);
+    assert.equal(db.wardSummary(otherCitizen).length, 0);
+    const messageId = db.postCaseMessage(citizen, { id, body: 'Please check the damaged crossing.' });
+    assert.ok(messageId > 0);
+    assert.equal(db.complaintDetail(owner, { id }).messages.length, 1);
+    assert.throws(() => db.complaintDetail(otherCitizen, { id }), /not found/i);
+    assert.throws(() => db.postCaseMessage(otherCitizen, { id, body: 'Unauthorized message' }), /permission/);
+    db.act(owner, { id, action: 'verify' });
+    db.act(owner, { id, action: 'assign', departmentId: 1 });
+    assert.equal(db.complaintDetail(road, { id }).messages.length, 1);
+    assert.equal(db.complaintDetail(waste, { id }).messages.length, 0);
+    assert.throws(() => db.postCaseMessage(waste, { id, body: 'Wrong team' }), /permission/);
+    db.postCaseMessage(road, { id, body: '', image: 'data:image/png;base64,AAAA' });
+    assert.equal(db.complaintDetail(citizen, { id }).messages.length, 2);
+    assert.equal(db.automaticBackupData().tables.case_messages.length, 2);
+    assert.equal(db.setLanguage(citizen, { language: 'bn' }), 'bn');
+    assert.equal(db.userById(citizen.id).language, 'bn');
+  } finally { db.close(); }
+});
 
 test('report pins show the named exact place only to the owner and assigned team', async () => {
   const db = await createDatabase(':memory:');
   try {
     const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
-    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     db.manage(owner, { type: 'user', name: 'Road Worker', email: 'roads@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
     db.manage(owner, { type: 'user', name: 'Waste Worker', email: 'waste@example.test', password: 'staff-password-123', role: 'staff', departmentId: 2 });
     const assignedStaff = db.login('roads@example.test', 'staff-password-123');
@@ -72,8 +107,9 @@ test('citizen data removal requires owner review and scrubs report details', asy
   const db = await createDatabase(':memory:');
   try {
     const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
-    const citizen = db.register({ name: 'Private Resident', email: 'private@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const citizen = db.register({ name: 'Private Resident', email: 'private@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     const complaintId = db.createComplaint(citizen, sample);
+    db.postCaseMessage(citizen, { id: complaintId, body: 'Private details for the team', image: 'data:image/png;base64,AAAA' });
     assert.throws(() => db.requestPrivacyRemoval(citizen, { password: 'wrong' }), /password/);
     const requestId = db.requestPrivacyRemoval(citizen, { password: 'citizen-password-123', reason: 'Please remove my details.' });
     assert.equal(db.snapshot(citizen).privacyRequest.status, 'Pending');
@@ -89,6 +125,9 @@ test('citizen data removal requires owner review and scrubs report details', asy
     assert.equal(report.place_name, null);
     assert.equal(report.location_exact, false);
     assert.equal(report.description.includes('Vehicles'), false);
+    const erasedMessage = db.automaticBackupData().tables.case_messages[0];
+    assert.equal(erasedMessage.body, '');
+    assert.equal(erasedMessage.image, null);
     assert.equal(db.snapshot(owner).privacyRequests[0].reason, '');
   } finally { db.close(); }
 });
@@ -99,7 +138,7 @@ test('owner can preview and anonymize only old terminal cases', async () => {
   try {
     let db = await createDatabase(file);
     const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
-    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     const oldId = db.createComplaint(citizen, sample);
     db.act(owner, { id: oldId, action: 'reject', note: 'Cannot verify the old report.' });
     const activeId = db.createComplaint(citizen, { ...sample, title: 'Current crossing damage' });
@@ -125,8 +164,8 @@ test('repair evidence, citizen rework review and department scorecard', async ()
   const db = await createDatabase(':memory:');
   try {
     const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
-    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
-    const other = db.register({ name: 'Other Citizen', email: 'other@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    const other = db.register({ name: 'Other Citizen', email: 'other@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     db.manage(owner, { type: 'user', name: 'Road Worker', email: 'staff@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
     const staff = db.login('staff@example.test', 'staff-password-123');
     const id = db.createComplaint(citizen, sample);
@@ -170,7 +209,7 @@ test('deadline escalation is recorded once and reaches staff then administrators
   try {
     let db = await createDatabase(file);
     const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
-    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     db.manage(owner, { type: 'user', name: 'Road Worker', email: 'staff@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
     const staff = db.login('staff@example.test', 'staff-password-123');
     const id = db.createComplaint(citizen, sample);
@@ -202,8 +241,8 @@ test('closure targets and recurring issues keep other reporter details private',
   const db = await createDatabase(':memory:');
   try {
     const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
-    const firstReporter = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
-    const nextReporter = db.register({ name: 'Second Citizen', email: 'second@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const firstReporter = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    const nextReporter = db.register({ name: 'Second Citizen', email: 'second@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     db.manage(owner, { type: 'resolutionTime', categoryId: 2, hours: 24 });
     const originalId = db.createComplaint(firstReporter, sample);
     const first = db.complaintDetail(owner, { id: originalId }).complaint;
@@ -235,7 +274,7 @@ test('closure targets and recurring issues keep other reporter details private',
     const performance = db.performance(owner);
     assert.equal(performance.departments.find(row => row.id === 1).average_rating, 5);
     assert.equal(performance.departments.find(row => row.id === 1).finished, 1);
-    assert.equal(performance.areas.find(row => row.area === 'Dhanmondi').finished, 1);
+    assert.equal(performance.areas.find(row => row.area === 'DNCC Ward 15').finished, 1);
     assert.throws(() => db.performance(worker), /permission/);
     assert.throws(() => db.performance(firstReporter), /permission/);
     const recurringId = db.createComplaint(nextReporter, { ...sample, title: 'Same crossing has broken again', latitude: sample.latitude + 0.0001 });
@@ -289,7 +328,7 @@ test('unconfirmed work cannot be finished and a new repair cycle needs fresh con
   const db = await createDatabase(':memory:');
   try {
     const owner = db.bootstrapAdmin({ name: 'Owner', email: 'owner@review.test', password: 'owner-secret-password' });
-    const citizen = db.register({ name: 'Resident', email: 'resident@review.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const citizen = db.register({ name: 'Resident', email: 'resident@review.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     db.manage(owner, { type: 'user', name: 'Road Team', email: 'roads@review.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
     const worker = db.login('roads@review.test', 'staff-password-123');
     const id = db.createComplaint(citizen, sample);
@@ -310,7 +349,7 @@ test('unconfirmed work cannot be finished and a new repair cycle needs fresh con
     const result = db.performance(owner);
     assert.equal(result.departments.find(row => row.id === 1).finished, 1);
     assert.equal(result.departments.find(row => row.id === 1).average_rating, 4);
-    assert.equal(result.areas.find(row => row.area === 'Dhanmondi').finished, 1);
+    assert.equal(result.areas.find(row => row.area === 'DNCC Ward 15').finished, 1);
   } finally { db.close(); }
 });
 
@@ -320,7 +359,7 @@ test('overdue closure filters clear on confirmation and a rework gets a new dead
   try {
     const db = await createDatabase(file);
     const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
-    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     const reportId = db.createComplaint(citizen, sample);
     db.close();
     const SQL = await initSqlJs({ locateFile: () => require.resolve('sql.js/dist/sql-wasm.wasm') });
@@ -352,7 +391,7 @@ test('email verification and recovery links are single use', async () => {
   const db = await createDatabase(':memory:');
   try {
     db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
-    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     assert.equal(citizen.emailVerified, false);
     const verify = db.issueAccountToken(citizen.id, 'verify');
     assert.equal(verify.email, citizen.email);
@@ -384,15 +423,15 @@ test('clean setup, private reports, department scope and account controls', asyn
     const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
     assert.equal(db.setupRequired(), false);
     assert.throws(() => db.bootstrapAdmin({ name: 'Another Owner', email: 'another@example.test', password: 'owner-secret-password' }), /already configured/);
-    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
-    const neighbor = db.register({ name: 'Second Citizen', email: 'second@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    const neighbor = db.register({ name: 'Second Citizen', email: 'second@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     db.manage(owner, { type: 'user', name: 'Road Worker', email: 'staff@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
     db.manage(owner, { type: 'user', name: 'Service Admin', email: 'admin@example.test', password: 'admin-password-123', role: 'admin' });
     const staff = db.login('staff@example.test', 'staff-password-123');
     const admin = db.login('admin@example.test', 'admin-password-123');
     const id = db.createComplaint(citizen, sample);
     assert.equal(db.areaSummary(owner).total, 1);
-    assert.equal(db.areaSummary(neighbor, { query: 'Dhan' }).total, 1);
+    assert.equal(db.areaSummary(neighbor, { query: 'DNCC' }).total, 1);
     assert.equal(db.snapshot(neighbor).complaints.length, 0);
     assert.equal(db.snapshot(staff).complaints.length, 0);
     assert.equal(db.snapshot(citizen).complaints[0].image, null);
@@ -429,7 +468,7 @@ test('cursor pages cover all visible reports and search reaches older records', 
   const db = await createDatabase(':memory:');
   try {
     const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
-    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     for (let n = 1; n <= 55; n++) {
       const id = db.createComplaint(citizen, { ...sample, title: `Broken crossing number ${n}` });
       if (n <= 30) db.act(owner, { id, action: 'verify' });
@@ -444,7 +483,7 @@ test('cursor pages cover all visible reports and search reaches older records', 
     assert.equal(db.snapshot(citizen).complaints.length, 25);
     assert.equal(db.snapshot(citizen).summary.counts.total, 55);
     assert.equal(db.areaSummary(owner).total, 55);
-    assert.equal(db.areaSummary(citizen, { query: 'Dhanmondi' }).total, 55);
+    assert.equal(db.areaSummary(citizen, { query: 'DNCC Ward 15' }).total, 55);
     assert.equal(db.listComplaints(owner, { query: 'number 1' }).total, 11);
     assert.equal(db.listComplaints(owner, { scope: 'Needs verification' }).total, 25);
   } finally { db.close(); }
@@ -455,7 +494,7 @@ test('owner backup requires password, pages complete data, and restores a checke
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'civicpulse-backup-'));
   try {
     const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
-    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
+    const citizen = db.register({ name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     for (let n = 0; n < 7; n++) db.createComplaint(citizen, { ...sample, title: `Crossing ${n}` });
     const firstId = db.listComplaints(owner).complaints[0].id;
     db.act(owner, { id: firstId, action: 'verify' });
@@ -493,7 +532,7 @@ test('owner backup requires password, pages complete data, and restores a checke
     const target = path.join(folder, 'restored.sqlite');
     await restoreNew(decryptBackup(bytes, 'test-secret-passphrase'), target);
     const restored = await createDatabase(target);
-    try { assert.equal(restored.listComplaints(owner).total, 7); assert.equal(restored.areaSummary(owner, { query: 'Dhanmondi' }).total, 7); assert.equal(restored.login('owner@example.test', 'owner-secret-password').role, 'superadmin'); assert.equal(restored.snapshot(citizen).notifications.length, 1); }
+    try { assert.equal(restored.listComplaints(owner).total, 7); assert.equal(restored.areaSummary(owner, { query: 'DNCC Ward 15' }).total, 7); assert.equal(restored.login('owner@example.test', 'owner-secret-password').role, 'superadmin'); assert.equal(restored.snapshot(citizen).notifications.length, 1); }
     finally { restored.close(); }
     const legacyTables = { ...tables }; delete legacyTables.notifications;
     const olderTarget = path.join(folder, 'older-backup.sqlite');

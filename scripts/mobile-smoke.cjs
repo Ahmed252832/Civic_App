@@ -9,8 +9,8 @@ const { createWebServer } = require('../server/web.cjs');
   let browser;
   try {
     const owner = database.bootstrapAdmin({ name: 'Test Owner', email: 'owner@example.test', password: 'owner-password-123' });
-    const citizen = database.register({ name: 'Test Citizen', email: 'citizen@example.test', area: 'Dhanmondi', password: 'citizen-password-123' });
-    const issueId = database.createComplaint(citizen, { title: 'Broken crossing near the lake', description: 'The footpath crossing needs urgent repair.', categoryId: 1, area: 'Dhanmondi', placeName: 'Dhanmondi Lake east gate', latitude: 23.7469, longitude: 90.3754, severity: 'High' });
+    const citizen = database.register({ name: 'Test Citizen', email: 'citizen@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    const issueId = database.createComplaint(citizen, { title: 'Broken crossing near the lake', description: 'The footpath crossing needs urgent repair.', categoryId: 1, area: 'DNCC Ward 15', wardCode: 'DNCC-15', placeName: 'Dhanmondi Lake east gate', latitude: 23.7469, longitude: 90.3754, severity: 'High' });
     database.act(owner, { id: issueId, action: 'verify' });
     database.act(owner, { id: issueId, action: 'assign', departmentId: 1 });
     browser = await chromium.launch({ executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe', headless: true });
@@ -42,14 +42,40 @@ const { createWebServer } = require('../server/web.cjs');
     await page.locator('.sidebar nav').getByRole('button', { name: 'Report an issue' }).click();
     await page.getByLabel('Latitude').fill('23.74690');
     await page.getByLabel('Longitude').fill('90.37540');
-    await page.getByRole('status').filter({ hasText: 'Selected 23.746900, 90.375400' }).waitFor();
+    await page.getByRole('status').filter({ hasText: '23.746900, 90.375400' }).waitFor();
+    await page.getByLabel('Issue title').fill('Damaged drain cover near the lake');
+    await page.getByLabel('Description').fill('This cover has been broken since Monday and pedestrians could fall in.');
+    await page.getByLabel('Your ward').selectOption('DNCC-15');
+    await page.getByText('Draft saved on this device').waitFor();
+    await page.reload();
+    await page.locator('.sidebar nav').getByRole('button', { name: 'Report an issue' }).click();
+    assert.equal(await page.getByLabel('Issue title').inputValue(), 'Damaged drain cover near the lake');
+    assert.equal(await page.getByLabel('Latitude').inputValue(), '23.746900');
+    assert.equal(await page.getByLabel('Your ward').inputValue(), 'DNCC-15');
+    await page.locator('.language-toggle').getByRole('button', { name: 'বাংলা' }).click();
+    await page.locator('.section-heading h2').getByText('সমস্যা জানান', { exact: true }).waitFor();
+    assert.equal(await page.locator('html').getAttribute('lang'), 'bn');
+    await page.locator('.language-toggle').getByRole('button', { name: 'EN' }).click();
+    await page.getByLabel('Latitude').focus();
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.type('23.748100');
+    await page.getByLabel('Longitude').focus();
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.type('90.377100');
+    await page.getByRole('status').filter({ hasText: '23.748100, 90.377100' }).waitFor();
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 844 });
       const dimensions = await page.evaluate(() => ({ viewport: innerWidth, document: document.documentElement.scrollWidth }));
       assert.ok(dimensions.document <= dimensions.viewport, `Horizontal overflow at ${width}px: ${JSON.stringify(dimensions)}`);
       assert.ok(await page.locator('.sidebar nav').getByRole('button', { name: 'Notifications' }).isVisible());
+      for (const selector of ['.draft-bar button', '.language-toggle button', '.submit-report']) {
+        const boxes = await page.locator(selector).evaluateAll(elements => elements.map(element => {
+          const rect = element.getBoundingClientRect(); return { width: rect.width, height: rect.height };
+        }));
+        assert.ok(boxes.every(box => box.width >= 24 && box.height >= 24), `${selector} is below the WCAG 2.2 minimum target size at ${width}px`);
+      }
     }
-    console.log('Mobile smoke passed: location pin, map zoom, report transfer, 390px and 320px layouts.');
+    console.log('Mobile smoke passed: location pin, map zoom, draft reload, language switch, keyboard coordinates, target sizes, and 390px/320px layouts.');
   } finally {
     await browser?.close();
     await new Promise(resolve => server.close(resolve));

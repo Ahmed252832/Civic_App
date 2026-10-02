@@ -41,9 +41,22 @@ const validPushEndpoint = value => {
     return url.protocol === 'https:' && (url.hostname === 'fcm.googleapis.com' || url.hostname === 'updates.push.services.mozilla.com' || url.hostname.endsWith('.push.apple.com') || url.hostname.endsWith('.push.services.mozilla.com'));
   } catch { return false; }
 };
-async function sendAlertMail(env, to, title) {
+const alertTitlesBn = {
+  'New case message': 'অভিযোগে নতুন বার্তা',
+  'Please review completed work': 'সম্পন্ন কাজ যাচাই করুন',
+  'Due soon': 'সময়সীমা কাছাকাছি',
+  'Overdue': 'সময়সীমা পেরিয়েছে',
+  'Rework review needed': 'পুনরায় কাজের আবেদন দেখুন',
+  'Rework approved': 'পুনরায় কাজ অনুমোদিত',
+  'Rework declined': 'পুনরায় কাজের আবেদন বাতিল'
+};
+const alertTitle = (title, language) => language === 'bn' ? alertTitlesBn[title] || title : title;
+async function sendAlertMail(env, to, title, language = 'en') {
   if (!mailReady(env)) return;
-  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: env.MAIL_FROM, to: [to], subject: `CivicPulse: ${title}`, text: `You have an update in CivicPulse. Sign in at ${new URL(env.PUBLIC_APP_URL).origin}/ to view the details.` }) });
+  const text = language === 'bn'
+    ? `CivicPulse-এ আপনার অভিযোগের নতুন তথ্য আছে। বিস্তারিত দেখতে ${new URL(env.PUBLIC_APP_URL).origin}/-এ প্রবেশ করুন।`
+    : `You have an update in CivicPulse. Sign in at ${new URL(env.PUBLIC_APP_URL).origin}/ to view the details.`;
+  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: env.MAIL_FROM, to: [to], subject: `CivicPulse: ${alertTitle(title, language)}`, text }) });
   if (!response.ok) console.error('Alert email delivery failed:', response.status);
 }
 
@@ -64,19 +77,19 @@ export class CivicState {
   }
   async deliverNotifications(afterId) {
     if (!pushReady(this.env) && !mailReady(this.env)) return;
-    const rows = this.state.storage.sql.exec('SELECT n.id,n.user_id,n.complaint_id,n.title,u.email,u.email_verified FROM notifications n JOIN users u ON u.id=n.user_id WHERE n.id>? AND u.active=1 ORDER BY n.id LIMIT 1000', afterId).toArray();
+    const rows = this.state.storage.sql.exec('SELECT n.id,n.user_id,n.complaint_id,n.title,u.email,u.email_verified,u.language FROM notifications n JOIN users u ON u.id=n.user_id WHERE n.id>? AND u.active=1 ORDER BY n.id LIMIT 1000', afterId).toArray();
     for (const row of rows) {
       if (pushReady(this.env)) {
         const subscriptions = this.state.storage.sql.exec('SELECT endpoint,p256dh,auth FROM push_subscriptions WHERE user_id=?', row.user_id).toArray();
         for (const sub of subscriptions) {
           try {
-            const delivered = await sendPushNotification({ endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } }, { title: row.title, body: 'Open CivicPulse to view your update.', url: '/', tag: `civic-${row.id}` }, { publicKey: this.env.VAPID_PUBLIC_KEY, privateKey: this.env.VAPID_PRIVATE_KEY, subject: this.env.VAPID_SUBJECT });
+            const delivered = await sendPushNotification({ endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } }, { title: alertTitle(row.title, row.language), body: row.language === 'bn' ? 'নতুন তথ্য দেখতে CivicPulse খুলুন।' : 'Open CivicPulse to view your update.', url: '/', tag: `civic-${row.id}` }, { publicKey: this.env.VAPID_PUBLIC_KEY, privateKey: this.env.VAPID_PRIVATE_KEY, subject: this.env.VAPID_SUBJECT });
             if (!delivered) this.state.storage.sql.exec('DELETE FROM push_subscriptions WHERE endpoint=?', sub.endpoint);
           } catch (error) { console.error('Push delivery failed:', error?.statusCode || 'network'); }
         }
       }
       if (mailReady(this.env) && row.email_verified) {
-        try { await sendAlertMail(this.env, row.email, row.title); }
+        try { await sendAlertMail(this.env, row.email, row.title, row.language); }
         catch (error) { console.error('Alert email failed:', error instanceof Error ? error.message : 'network'); }
       }
     }
@@ -270,8 +283,11 @@ export class CivicState {
         case 'decideReopen': data = this.store.decideReopen(user, payload); break;
         case 'readNotification': data = this.store.readNotification(user, payload); break;
         case 'areaSummary': data = this.store.areaSummary(user, payload); break;
+        case 'wardSummary': data = this.store.wardSummary(user); break;
+        case 'setLanguage': data = this.store.setLanguage(user, payload); break;
         case 'listComplaints': data = this.store.listComplaints(user, payload); break;
         case 'complaintDetail': data = this.store.complaintDetail(user, payload); break;
+        case 'caseMessage': this.rateLimit(request, 'case-message', 40); data = this.store.postCaseMessage(user, payload); break;
         case 'nearby': data = this.store.nearby(user, payload); break;
         case 'create': this.rateLimit(request, 'complaint', 8); await verifyTurnstile(this.env, payload.turnstileToken, request.headers.get('x-civic-ip')); data = this.store.createComplaint(user, payload); break;
         case 'action': data = this.store.act(user, payload); break;
@@ -285,7 +301,7 @@ export class CivicState {
         case 'endBackup': data = this.store.endBackup(user, payload); break;
         default: throw new Error('Unknown request.');
       }
-      if (['action','feedback','requestReopen','decideReopen'].includes(method)) this.state.waitUntil(this.deliverNotifications(notificationsBefore));
+      if (['action','feedback','requestReopen','decideReopen','caseMessage'].includes(method)) this.state.waitUntil(this.deliverNotifications(notificationsBefore));
       return json(200, { ok: true, data });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

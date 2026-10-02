@@ -95,8 +95,11 @@ app.whenReady().then(async () => {
           case 'decideReopen': result = database.decideReopen(actor, payload); break;
         case 'readNotification': result = database.readNotification(actor, payload); break;
         case 'areaSummary': result = database.areaSummary(actor, payload); break;
+        case 'wardSummary': result = database.wardSummary(actor); break;
+        case 'setLanguage': result = database.setLanguage(actor, payload); break;
         case 'listComplaints': result = database.listComplaints(actor, payload); break;
         case 'complaintDetail': result = database.complaintDetail(actor, payload); break;
+        case 'caseMessage': result = database.postCaseMessage(actor, payload); break;
         case 'nearby': result = database.nearby(actor, payload); break;
         case 'create':
           result = database.createComplaint(actor, payload);

@@ -1,7 +1,13 @@
 const crypto = require('node:crypto');
+const WARD_LIMITS = require('./wards.json');
 const SEVERITIES = ['Low', 'Medium', 'High', 'Critical'];
 const ACTIVE = ['Submitted', 'Under Review', 'Verified', 'Assigned', 'In Progress', 'Reopened'];
-const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'reopen_requests', 'privacy_requests', 'audit'];
+const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'reopen_requests', 'privacy_requests', 'audit', 'case_messages'];
+const validWard = value => {
+  const match = /^(DNCC|DSCC)-(\d{2})$/.exec(String(value || ''));
+  return match && Number(match[2]) >= 1 && Number(match[2]) <= WARD_LIMITS[match[1]];
+};
+const wardLabel = code => `${code.slice(0, 4)} Ward ${code.slice(5)}`;
 // Operational pilot boundary for Dhaka city; replace with an approved city polygon before municipal use.
 const DHAKA_BOUNDS = { south: 23.68, north: 23.92, west: 90.30, east: 90.53 };
 const inDhaka = (latitude, longitude) => latitude >= DHAKA_BOUNDS.south && latitude <= DHAKA_BOUNDS.north && longitude >= DHAKA_BOUNDS.west && longitude <= DHAKA_BOUNDS.east;
@@ -93,6 +99,7 @@ function createStore(adapter, options = {}) {
   if (!complaintColumns.has('escalation_level')) run('ALTER TABLE complaints ADD COLUMN escalation_level INTEGER NOT NULL DEFAULT 0');
   if (!complaintColumns.has('retained_at')) run('ALTER TABLE complaints ADD COLUMN retained_at TEXT');
   if (!complaintColumns.has('place_name')) run('ALTER TABLE complaints ADD COLUMN place_name TEXT');
+  if (!complaintColumns.has('ward_code')) run('ALTER TABLE complaints ADD COLUMN ward_code TEXT');
   run("UPDATE complaints SET finished_at=updated_at WHERE status='Finished' AND finished_at IS NULL");
   run("UPDATE complaints SET resolution_due_at=(SELECT datetime(complaints.created_at, '+' || COALESCE(k.resolution_hours,168) || ' hours') FROM categories k WHERE k.id=complaints.category_id) WHERE resolution_due_at IS NULL");
   run('CREATE TABLE IF NOT EXISTS area_counts (area_key TEXT PRIMARY KEY, total INTEGER NOT NULL)');
@@ -119,6 +126,9 @@ function createStore(adapter, options = {}) {
   run(`CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), complaint_id INTEGER NOT NULL REFERENCES complaints(id),
     title TEXT NOT NULL, message TEXT NOT NULL, read_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
+  run(`CREATE TABLE IF NOT EXISTS case_messages (
+    id INTEGER PRIMARY KEY, complaint_id INTEGER NOT NULL REFERENCES complaints(id), sender_id INTEGER NOT NULL REFERENCES users(id),
+    body TEXT NOT NULL DEFAULT '', image TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
   run(`CREATE TABLE IF NOT EXISTS escalation_events (
     id INTEGER PRIMARY KEY, complaint_id INTEGER NOT NULL REFERENCES complaints(id), stage TEXT NOT NULL,
     message TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
@@ -137,6 +147,7 @@ function createStore(adapter, options = {}) {
   if (!userColumns.has('mfa_pending')) run('ALTER TABLE users ADD COLUMN mfa_pending TEXT');
   if (!userColumns.has('mfa_pending_expires')) run('ALTER TABLE users ADD COLUMN mfa_pending_expires INTEGER');
   if (!userColumns.has('mfa_last_step')) run('ALTER TABLE users ADD COLUMN mfa_last_step INTEGER NOT NULL DEFAULT -1');
+  if (!userColumns.has('language')) run("ALTER TABLE users ADD COLUMN language TEXT NOT NULL DEFAULT 'en'");
   run(`CREATE TABLE IF NOT EXISTS privacy_requests (
     id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'Pending',
     reason TEXT NOT NULL DEFAULT '', decision_note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -147,12 +158,14 @@ function createStore(adapter, options = {}) {
   run('CREATE INDEX IF NOT EXISTS complaints_reporter_id ON complaints(reporter_id,id)');
   run('CREATE INDEX IF NOT EXISTS complaints_department_id ON complaints(department_id,id)');
   run('CREATE INDEX IF NOT EXISTS complaints_status_id ON complaints(status,id)');
+  run('CREATE INDEX IF NOT EXISTS complaints_ward_id ON complaints(ward_code,id)');
   run('CREATE INDEX IF NOT EXISTS complaints_resolution_due ON complaints(closed_at,resolution_due_at)');
   run('CREATE INDEX IF NOT EXISTS complaints_recurrence_of ON complaints(recurrence_of)');
   run('CREATE INDEX IF NOT EXISTS complaints_category_resolution ON complaints(category_id,status,resolved_at)');
   run('CREATE INDEX IF NOT EXISTS updates_complaint_id ON updates(complaint_id,id)');
   run('CREATE INDEX IF NOT EXISTS feedback_complaint_id ON feedback(complaint_id,id)');
   run('CREATE INDEX IF NOT EXISTS notifications_user_id ON notifications(user_id,id)');
+  run('CREATE INDEX IF NOT EXISTS case_messages_complaint_id ON case_messages(complaint_id,id)');
   run('CREATE INDEX IF NOT EXISTS cycles_complaint_id ON cycles(complaint_id,id)');
   run('CREATE INDEX IF NOT EXISTS reopen_requests_complaint_id ON reopen_requests(complaint_id,id)');
   run('CREATE INDEX IF NOT EXISTS escalation_events_complaint_id ON escalation_events(complaint_id,id)');
@@ -175,6 +188,7 @@ function createStore(adapter, options = {}) {
     run("UPDATE feedback SET comment='',local=0 WHERE complaint_id=?", [complaintId]);
     run("UPDATE reopen_requests SET reason='',decision_note='' WHERE complaint_id=?", [complaintId]);
     run("UPDATE notifications SET title='Case updated',message='Personal case details removed.' WHERE complaint_id=?", [complaintId]);
+    run("UPDATE case_messages SET body='',image=NULL WHERE complaint_id=?", [complaintId]);
     run("UPDATE escalation_events SET message='Case deadline recorded.' WHERE complaint_id=?", [complaintId]);
     run("UPDATE audit SET detail='' WHERE target_type='complaint' AND target_id=?", [complaintId]);
   };
@@ -212,7 +226,7 @@ function createStore(adapter, options = {}) {
   }
   persist();
 
-  const publicUser = row => row && ({ id: row.id, name: row.name, email: row.email, role: row.role, area: row.area, departmentId: row.department_id || null, verifiedArea: Boolean(row.verified_area), emailVerified: Boolean(row.email_verified), mfaEnabled: Boolean(row.mfa_secret), active: Boolean(row.active) });
+  const publicUser = row => row && ({ id: row.id, name: row.name, email: row.email, role: row.role, area: row.area, language: row.language || 'en', departmentId: row.department_id || null, verifiedArea: Boolean(row.verified_area), emailVerified: Boolean(row.email_verified), mfaEnabled: Boolean(row.mfa_secret), active: Boolean(row.active) });
   const store = {
     setupRequired() { return !one("SELECT id FROM users WHERE role='superadmin' LIMIT 1"); },
     bootstrapAdmin(payload) {
@@ -232,7 +246,8 @@ function createStore(adapter, options = {}) {
       const area = safeText(payload.area, 100), password = String(payload.password || '');
       demand(name.length >= 2, 'Enter your full name.');
       demand(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email), 'Enter a valid email address.');
-      demand(area.length >= 2, 'Enter your area.');
+      const ward = /^(DNCC|DSCC) Ward (\d{2})$/.exec(area);
+      demand(ward && validWard(`${ward[1]}-${ward[2]}`), 'Choose a valid Dhaka North or South ward.');
       demand(password.length >= 10 && password.length <= 128, 'Use a password of 10 to 128 characters.');
       demand(!one('SELECT id FROM users WHERE lower(email)=lower(?)', [email]), 'This email is already registered.');
       return transact(() => {
@@ -409,6 +424,7 @@ function createStore(adapter, options = {}) {
       demand(user, 'Please sign in.');
       const limit = pageSize(payload.limit), cursor = cursorId(payload.cursor);
       const search = safeText(payload.query, 80), scope = safeText(payload.scope, 40), status = safeText(payload.status, 30);
+      const wardCode = safeText(payload.wardCode, 7);
       const access = visibility(user), where = [access.sql], params = [...access.params];
       if (scope === 'My reports' && user.role === 'citizen') { where.push('c.reporter_id=?'); params.push(user.id); }
       if (scope === 'My area' && user.role === 'citizen') { where.push('c.area=?'); params.push(user.area); }
@@ -420,11 +436,12 @@ function createStore(adapter, options = {}) {
       if (scope === 'Citizen verified' && ['admin','superadmin'].includes(user.role)) where.push("c.status='Citizen Verified'");
       if (scope === 'Finished work' && ['admin','superadmin'].includes(user.role)) where.push("c.status='Finished'");
       if (status && status !== 'All statuses') { where.push('c.status=?'); params.push(status); }
+      if (wardCode) { demand(validWard(wardCode), 'Choose a valid ward.'); where.push('c.ward_code=?'); params.push(wardCode); }
       if (search) { where.push('(c.code LIKE ? OR c.title LIKE ? OR c.area LIKE ? OR k.name LIKE ?)'); params.push(...Array(4).fill(`%${search}%`)); }
       const from = 'FROM complaints c JOIN categories k ON k.id=c.category_id LEFT JOIN departments d ON d.id=c.department_id JOIN users u ON u.id=c.reporter_id';
       const total = one(`SELECT COUNT(*) AS n ${from} WHERE ${where.join(' AND ')}`, params).n;
       if (cursor) { where.push('c.id<?'); params.push(cursor); }
-      const rows = all(`SELECT c.id,c.code,c.reporter_id,c.title,c.description,c.category_id,c.area,c.place_name,c.latitude,c.longitude,c.severity,c.priority,c.status,c.department_id,c.duplicate_of,c.recurrence_of,c.resolution_due_at,c.closed_at,c.retained_at,c.created_at,c.updated_at,c.resolved_at,
+      const rows = all(`SELECT c.id,c.code,c.reporter_id,c.title,c.description,c.category_id,c.area,c.ward_code,c.place_name,c.latitude,c.longitude,c.severity,c.priority,c.status,c.department_id,c.duplicate_of,c.recurrence_of,c.resolution_due_at,c.closed_at,c.retained_at,c.created_at,c.updated_at,c.resolved_at,
         k.name AS category,d.name AS department,u.name AS reporter ${from} WHERE ${where.join(' AND ')} ORDER BY c.id DESC LIMIT ?`, [...params, limit + 1]);
       const more = rows.length > limit;
       const complaints = rows.slice(0, limit).map(row => safeCase(user, { ...row, image: null, completion_image: null }));
@@ -447,7 +464,46 @@ function createStore(adapter, options = {}) {
       const escalationEvents = privateAccess ? all('SELECT * FROM escalation_events WHERE complaint_id=? ORDER BY id DESC', [complaint.id]) : [];
       const reopenRequests = (fullAccess || (user.role === 'citizen' && complaint.reporter_id === user.id))
         ? all('SELECT * FROM reopen_requests WHERE complaint_id=? ORDER BY id DESC', [complaint.id]) : [];
-      return { complaint: safeCase(user, complaint), recurrence, updates, cycles, feedback, escalationEvents, reopenRequests };
+      const messages = privateAccess && !complaint.retained_at ? all(`SELECT m.id,m.complaint_id,m.sender_id,m.body,m.image,m.created_at,u.name AS sender,u.role AS sender_role
+        FROM case_messages m JOIN users u ON u.id=m.sender_id WHERE m.complaint_id=? ORDER BY m.id DESC LIMIT 200`, [complaint.id]).reverse() : [];
+      return { complaint: safeCase(user, complaint), recurrence, updates, cycles, feedback, escalationEvents, reopenRequests, messages };
+    },
+    postCaseMessage(user, payload) {
+      demand(user, 'Please sign in.');
+      const complaint = findComplaint(payload.id);
+      demand(privateCase(user, complaint) && !complaint.retained_at, 'You do not have permission for this conversation.');
+      const body = safeText(payload.body, 1000);
+      const image = payload.image || null;
+      demand(body.length >= 3 || image, 'Write a message or attach a photo.');
+      demand(!image || (typeof image === 'string' && /^data:image\/(png|jpeg|webp);base64,/.test(image) && image.length < 600000), 'Image is too large after optimization.');
+      return transact(() => {
+        run('INSERT INTO case_messages (complaint_id,sender_id,body,image) VALUES (?,?,?,?)', [complaint.id,user.id,body,image]);
+        const messageId = id();
+        run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Private case message','complaint',complaint.id,'']);
+        const recipients = user.role === 'citizen'
+          ? all("SELECT id FROM users WHERE active=1 AND (role IN ('admin','superadmin') OR (role='staff' AND department_id=?))", [complaint.department_id || -1])
+          : user.role === 'staff' ? [{ id: complaint.reporter_id }] : [
+              { id: complaint.reporter_id },
+              ...all("SELECT id FROM users WHERE active=1 AND role='staff' AND department_id=?", [complaint.department_id || -1])
+            ];
+        for (const recipient of recipients) if (recipient.id !== user.id) run('INSERT INTO notifications (user_id,complaint_id,title,message) VALUES (?,?,?,?)',
+          [recipient.id,complaint.id,'New case message',`${complaint.code}: Open the private conversation to read and reply.`]);
+        return messageId;
+      });
+    },
+    setLanguage(user, payload) {
+      demand(user, 'Please sign in.');
+      const language = payload.language;
+      demand(language === 'en' || language === 'bn', 'Choose English or Bangla.');
+      return transact(() => { run('UPDATE users SET language=? WHERE id=?', [language,user.id]); return language; });
+    },
+    wardSummary(user) {
+      demand(user, 'Please sign in.');
+      const access = user.role === 'staff' ? { sql: 'c.department_id=?', params: [user.departmentId || -1] } : visibility(user);
+      return all(`SELECT c.ward_code AS code,COUNT(*) AS total,
+        SUM(CASE WHEN c.status NOT IN ('Closed','Citizen Verified','Finished','Rejected','Duplicate') THEN 1 ELSE 0 END) AS open,
+        SUM(CASE WHEN c.status='Submitted' THEN 1 ELSE 0 END) AS awaiting
+        FROM complaints c WHERE ${access.sql} GROUP BY c.ward_code ORDER BY open DESC,total DESC LIMIT 130`, access.params);
     },
     summary(user) {
       demand(user, 'Please sign in.');
@@ -618,6 +674,7 @@ function createStore(adapter, options = {}) {
         complaints,
         nextCursor: page.nextCursor,
         summary: store.summary(user),
+        wardSummary: store.wardSummary(user),
         categories: all('SELECT * FROM categories ORDER BY name'),
         departments: all('SELECT * FROM departments ORDER BY name'),
         updates: all(`SELECT x.*, u.name AS actor, u.role AS actor_role FROM updates x JOIN users u ON u.id=x.actor_id WHERE x.complaint_id IN (${placeholders}) ORDER BY x.id DESC LIMIT 100`, ids)
@@ -645,7 +702,10 @@ function createStore(adapter, options = {}) {
     },
     createComplaint(user, payload) {
       requireRole(user, ['citizen']);
-      const title = safeText(payload.title, 120), description = safeText(payload.description, 2000), area = safeText(payload.area, 100), placeName = safeText(payload.placeName, 150);
+      const title = safeText(payload.title, 120), description = safeText(payload.description, 2000), placeName = safeText(payload.placeName, 150);
+      const wardCode = safeText(payload.wardCode, 7);
+      demand(validWard(wardCode), 'Choose a Dhaka North or South ward.');
+      const area = wardLabel(wardCode);
       const latitude = Number(payload.latitude), longitude = Number(payload.longitude), categoryId = Number(payload.categoryId);
       demand(title.length >= 6 && description.length >= 12, 'Enter a title and a useful description.');
       demand(area.length >= 2, 'Enter the area name.');
@@ -662,8 +722,8 @@ function createStore(adapter, options = {}) {
           AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? ORDER BY closed_at DESC`, [categoryId,latitude-0.001,latitude+0.001,longitude-0.0013,longitude+0.0013])
           .map(row => ({ ...row, distance: haversineMeters({ latitude, longitude }, row) }))
           .filter(row => row.distance <= 100).sort((a,b) => a.distance - b.distance || b.id - a.id)[0];
-        run(`INSERT INTO complaints (reporter_id,title,description,category_id,area,place_name,latitude,longitude,severity,image,resolution_due_at,recurrence_of)
-          VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now','+' || ? || ' hours'),?)`, [user.id,title,description,categoryId,area,placeName,latitude,longitude,payload.severity,image,category.resolution_hours,recurrence?.id || null]);
+        run(`INSERT INTO complaints (reporter_id,title,description,category_id,area,ward_code,place_name,latitude,longitude,severity,image,resolution_due_at,recurrence_of)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now','+' || ? || ' hours'),?)`, [user.id,title,description,categoryId,area,wardCode,placeName,latitude,longitude,payload.severity,image,category.resolution_hours,recurrence?.id || null]);
         run('INSERT INTO area_counts (area_key,total) VALUES (lower(trim(?)),1) ON CONFLICT(area_key) DO UPDATE SET total=total+1', [area]);
         const complaintId = id();
         run('UPDATE complaints SET code=? WHERE id=?', [`C-${String(1000 + complaintId)}`, complaintId]);

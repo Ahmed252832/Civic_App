@@ -4,8 +4,8 @@ const crypto = require('node:crypto');
 const initSqlJs = require('sql.js');
 const { createDatabase } = require('../electron/database.cjs');
 
-const TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'reopen_requests', 'privacy_requests', 'audit'];
-const REQUIRED_TABLES = TABLES.filter(table => !['notifications','escalation_events','reopen_requests','privacy_requests'].includes(table));
+const TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'reopen_requests', 'privacy_requests', 'audit', 'case_messages'];
+const REQUIRED_TABLES = TABLES.filter(table => !['notifications','escalation_events','reopen_requests','privacy_requests','case_messages'].includes(table));
 const MAX_BACKUP_BYTES = 200 * 1024 * 1024;
 
 function decryptBackup(bytes, passphrase) {

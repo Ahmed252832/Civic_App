@@ -34,10 +34,10 @@ const assert = require('node:assert/strict');
     await window.getByRole('button', { name: 'Change password' }).click();
     await window.getByText('Password updated. Other signed-in devices have been signed out.').waitFor();
     await window.evaluate(async () => {
-      const account = await window.civic.request('register', { name: 'Test Resident', email: 'resident@example.test', area: 'Dhanmondi', password: 'resident-password-123' });
+      const account = await window.civic.request('register', { name: 'Test Resident', email: 'resident@example.test', area: 'DNCC Ward 15', password: 'resident-password-123' });
       if (!account.ok) throw new Error(account.error);
       for (let n = 1; n <= 30; n++) {
-        const result = await window.civic.request('create', { title: `Broken crossing number ${n}`, description: 'Pedestrians are stepping into traffic because the crossing is damaged.', categoryId: 1, area: 'Dhanmondi', placeName: 'Dhanmondi Lake east gate', latitude: 23.7468, longitude: 90.3754, severity: 'Medium' });
+        const result = await window.civic.request('create', { title: `Broken crossing number ${n}`, description: 'Pedestrians are stepping into traffic because the crossing is damaged.', categoryId: 1, area: 'DNCC Ward 15', wardCode: 'DNCC-15', placeName: 'Dhanmondi Lake east gate', latitude: 23.7468, longitude: 90.3754, severity: 'Medium' });
         if (!result.ok) throw new Error(result.error);
       }
     });
