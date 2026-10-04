@@ -3,14 +3,14 @@ const WARD_LIMITS = require('./wards.json');
 const { parseWardFeatures, geometryContains, boundaryDistanceMeters } = require('./ward-geometry.cjs');
 const SEVERITIES = ['Low', 'Medium', 'High', 'Critical'];
 const ACTIVE = ['Submitted', 'Under Review', 'Verified', 'Assigned', 'In Progress', 'Reopened'];
-const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'reopen_requests', 'privacy_requests', 'audit', 'case_messages', 'ward_boundaries', 'recovery_checks', 'operational_events'];
+const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'citizen_reminders', 'reopen_requests', 'privacy_requests', 'audit', 'case_messages', 'ward_boundaries', 'recovery_checks', 'operational_events'];
 const validWard = value => {
   const match = /^(DNCC|DSCC)-(\d{2})$/.exec(String(value || ''));
   return match && Number(match[2]) >= 1 && Number(match[2]) <= WARD_LIMITS[match[1]];
 };
 const wardLabel = code => `${code.slice(0, 4)} Ward ${code.slice(5)}`;
 // Operational pilot boundary for Dhaka city; replace with an approved city polygon before municipal use.
-const DHAKA_BOUNDS = { south: 23.68, north: 23.92, west: 90.30, east: 90.53 };
+const DHAKA_BOUNDS = { south: 23.65, north: 23.94, west: 90.30, east: 90.54 };
 const inDhaka = (latitude, longitude) => latitude >= DHAKA_BOUNDS.south && latitude <= DHAKA_BOUNDS.north && longitude >= DHAKA_BOUNDS.west && longitude <= DHAKA_BOUNDS.east;
 const haversineMeters = (a, b) => {
   const toRad = n => n * Math.PI / 180;
@@ -142,6 +142,11 @@ function createStore(adapter, options = {}) {
   run(`CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), complaint_id INTEGER NOT NULL REFERENCES complaints(id),
     title TEXT NOT NULL, message TEXT NOT NULL, read_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
+  run(`CREATE TABLE IF NOT EXISTS citizen_reminders (
+    id INTEGER PRIMARY KEY, cycle_id INTEGER NOT NULL REFERENCES cycles(id), complaint_id INTEGER NOT NULL REFERENCES complaints(id),
+    stage INTEGER NOT NULL CHECK(stage IN (1,2)), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(cycle_id,stage))`);
+  run('CREATE INDEX IF NOT EXISTS citizen_reminders_complaint ON citizen_reminders(complaint_id,id)');
   run(`CREATE TABLE IF NOT EXISTS case_messages (
     id INTEGER PRIMARY KEY, complaint_id INTEGER NOT NULL REFERENCES complaints(id), sender_id INTEGER NOT NULL REFERENCES users(id),
     body TEXT NOT NULL DEFAULT '', image TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
@@ -679,6 +684,34 @@ function createStore(adapter, options = {}) {
       });
       return created;
     },
+    processCitizenReminders() {
+      const pending = all(`SELECT c.id,c.code,c.reporter_id,y.id AS cycle_id,y.resolved_at,
+        CASE WHEN y.resolved_at<=datetime('now','-7 days') THEN 2 ELSE 1 END AS stage
+        FROM complaints c JOIN cycles y ON y.id=(SELECT MAX(id) FROM cycles WHERE complaint_id=c.id)
+        JOIN users u ON u.id=c.reporter_id AND u.active=1
+        WHERE c.status='Awaiting Feedback' AND y.resolved_at<=datetime('now','-2 days')
+          AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.cycle_id=y.id)
+          AND NOT EXISTS (SELECT 1 FROM citizen_reminders r WHERE r.cycle_id=y.id AND r.stage=CASE WHEN y.resolved_at<=datetime('now','-7 days') THEN 2 ELSE 1 END)
+        ORDER BY y.resolved_at LIMIT 500`);
+      const created = [];
+      transact(() => {
+        for (const item of pending) {
+          for (let stage = 1; stage <= item.stage; stage++) {
+            if (one('SELECT id FROM citizen_reminders WHERE cycle_id=? AND stage=?', [item.cycle_id,stage])) continue;
+            if (item.stage === 2 && stage === 1) {
+              run('INSERT INTO citizen_reminders (cycle_id,complaint_id,stage) VALUES (?,?,?)', [item.cycle_id,item.id,stage]);
+              continue;
+            }
+            const title = 'Review reminder';
+            const message = `${item.code}: Please check the completed work and confirm whether the issue is resolved.`;
+            run('INSERT INTO citizen_reminders (cycle_id,complaint_id,stage) VALUES (?,?,?)', [item.cycle_id,item.id,stage]);
+            run('INSERT INTO notifications (user_id,complaint_id,title,message) VALUES (?,?,?,?)', [item.reporter_id,item.id,title,message]);
+            created.push({ userId: item.reporter_id, complaintId: item.id, title, message });
+          }
+        }
+      });
+      return created;
+    },
     readNotification(user, payload) {
       demand(user, 'Please sign in.');
       const notificationId = Number(payload.id);
@@ -795,15 +828,25 @@ function createStore(adapter, options = {}) {
         return { imported: features.length, total: one('SELECT COUNT(*) AS n FROM ward_boundaries WHERE code LIKE ?', [`${corporation}-%`]).n };
       });
     },
-    workQueue(user) {
+    workQueue(user, payload = {}) {
       requireRole(user, ['staff','admin','superadmin']);
+      const filter = safeText(payload.filter || 'all', 16);
+      demand(['all','unaccepted','mine','blocked','overdue'].includes(filter), 'Choose a work queue filter.');
+      const page = payload.page == null ? 1 : Number(payload.page);
+      demand(Number.isSafeInteger(page) && page >= 1 && page <= 100000, 'Choose a valid work queue page.');
+      const limit = 25;
       const where = ["c.department_id IS NOT NULL", "c.status NOT IN ('Closed','Finished','Citizen Verified','Rejected','Duplicate')"];
       const params = [];
       if (user.role === 'staff') { where.push('c.department_id=?'); params.push(user.departmentId || -1); }
+      if (filter === 'unaccepted') where.push('c.assignee_id IS NULL');
+      if (filter === 'mine') { where.push('c.assignee_id=?'); params.push(user.id); }
+      if (filter === 'blocked') where.push("c.blocked_reason IS NOT NULL AND c.blocked_reason<>''");
+      if (filter === 'overdue') where.push('c.resolution_due_at<CURRENT_TIMESTAMP');
+      const total = one(`SELECT COUNT(*) AS n FROM complaints c WHERE ${where.join(' AND ')}`, params).n;
       const rows = all(`SELECT c.id,c.code,c.title,c.status,c.priority,c.ward_code,c.area,c.department_id,c.assignee_id,c.accepted_at,c.blocked_reason,c.next_action_at,c.resolution_due_at,c.created_at,d.name AS department,u.name AS assignee
         FROM complaints c JOIN departments d ON d.id=c.department_id LEFT JOIN users u ON u.id=c.assignee_id WHERE ${where.join(' AND ')}
-        ORDER BY CASE WHEN c.blocked_reason IS NOT NULL AND c.blocked_reason<>'' THEN 1 WHEN c.assignee_id IS NULL THEN 0 ELSE 2 END,c.resolution_due_at ASC,c.id DESC LIMIT 200`, params);
-      return { cases: rows, staff: user.role === 'staff' ? [] : all("SELECT id,name,department_id FROM users WHERE role='staff' AND active=1 ORDER BY name") };
+        ORDER BY CASE WHEN c.blocked_reason IS NOT NULL AND c.blocked_reason<>'' THEN 1 WHEN c.assignee_id IS NULL THEN 0 ELSE 2 END,c.resolution_due_at ASC,c.id DESC LIMIT ? OFFSET ?`, [...params,limit,(page-1)*limit]);
+      return { cases: rows, total, page, pageSize: limit, staff: user.role === 'staff' ? [] : all("SELECT id,name,department_id FROM users WHERE role='staff' AND active=1 ORDER BY name") };
     },
     assignWork(user, payload) {
       requireRole(user, ['staff','admin','superadmin']);
@@ -849,7 +892,12 @@ function createStore(adapter, options = {}) {
       const media = one(`SELECT (SELECT COALESCE(SUM(COALESCE(length(image),0)+COALESCE(length(completion_image),0)),0) FROM complaints) +
         (SELECT COALESCE(SUM(length(completion_image)),0) FROM cycles) +
         (SELECT COALESCE(SUM(length(image)),0) FROM case_messages) AS bytes`);
-      return { counts, mediaBytesEstimate: media.bytes, lastRecoveryCheck: one('SELECT archive_created_at,accounts,complaints,created_at FROM recovery_checks ORDER BY id DESC LIMIT 1'), lastOffsiteBackup: one("SELECT created_at,detail FROM operational_events WHERE kind='offsite_backup' ORDER BY id DESC LIMIT 1"), alertFailures: one("SELECT COUNT(*) AS n FROM operational_events WHERE kind='alert_failure' AND created_at>=datetime('now','-7 days')").n };
+      return { counts, mediaBytesEstimate: media.bytes, lastRecoveryCheck: one('SELECT archive_created_at,accounts,complaints,created_at FROM recovery_checks ORDER BY id DESC LIMIT 1'), lastOffsiteBackup: one("SELECT created_at,detail FROM operational_events WHERE kind='offsite_backup' ORDER BY id DESC LIMIT 1"), lastManualBackup: one("SELECT created_at FROM operational_events WHERE kind='manual_backup' ORDER BY id DESC LIMIT 1"), alertFailures: one("SELECT COUNT(*) AS n FROM operational_events WHERE kind='alert_failure' AND created_at>=datetime('now','-7 days')").n };
+    },
+    recordManualBackup(user) {
+      requireRole(user, ['superadmin']);
+      run("INSERT INTO operational_events (kind,detail) VALUES ('manual_backup','Encrypted archive generated by owner')");
+      return true;
     },
     recordRecoveryCheck(user, payload) {
       requireRole(user, ['superadmin']);
@@ -874,7 +922,7 @@ function createStore(adapter, options = {}) {
       demand(saved && typeof payload.password === 'string' && payload.password.length <= 128 && verifyPassword(payload.password, saved.password_hash), 'Current password is incorrect.');
       return transact(() => {
         const count = one('SELECT COUNT(*) AS n FROM complaints').n;
-        for (const table of ['case_messages','notifications','feedback','updates','escalation_events','reopen_requests','cycles']) run(`DELETE FROM ${table}`);
+        for (const table of ['case_messages','notifications','feedback','updates','escalation_events','citizen_reminders','reopen_requests','cycles']) run(`DELETE FROM ${table}`);
         run('UPDATE complaints SET duplicate_of=NULL, recurrence_of=NULL');
         run('DELETE FROM complaints');
         run('DELETE FROM area_counts');

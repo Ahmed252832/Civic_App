@@ -10,6 +10,89 @@ const { decryptBackup, restoreNew } = require('../scripts/restore-backup.cjs');
 
 const sample = { title: 'Broken crossing at the corner', description: 'Vehicles are swerving around the damaged crossing.', categoryId: 2, area: 'DNCC Ward 15', wardCode: 'DNCC-15', placeName: 'Dhanmondi Lake east gate', latitude: 23.7469, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' };
 
+test('staff work pages include older cases and apply role-scoped filters', async () => {
+  const db = await createDatabase(':memory:');
+  try {
+    const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'Resident', email: 'resident@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    db.manage(owner, { type: 'user', name: 'Road Worker', email: 'road@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+    db.manage(owner, { type: 'user', name: 'Waste Worker', email: 'waste@example.test', password: 'staff-password-123', role: 'staff', departmentId: 2 });
+    const road = db.login('road@example.test', 'staff-password-123');
+    const waste = db.login('waste@example.test', 'staff-password-123');
+    const ids = [];
+    for (let n = 0; n < 28; n++) {
+      const id = db.createComplaint(citizen, { ...sample, title: `Broken crossing number ${n}` });
+      db.act(owner, { id, action: 'verify' });
+      db.act(owner, { id, action: 'assign', departmentId: 1 });
+      ids.push(id);
+    }
+    const first = db.workQueue(road, { page: 1 });
+    const second = db.workQueue(road, { page: 2 });
+    assert.equal(first.total, 28);
+    assert.equal(first.cases.length, 25);
+    assert.equal(second.cases.length, 3);
+    assert.equal(new Set([...first.cases, ...second.cases].map(item => item.id)).size, 28);
+    assert.equal(db.workQueue(waste).total, 0);
+    assert.equal(db.workQueue(owner, { filter: 'unaccepted' }).total, 28);
+    db.assignWork(road, { id: ids[0] });
+    assert.equal(db.workQueue(road, { filter: 'mine' }).total, 1);
+    assert.equal(db.workQueue(owner, { filter: 'unaccepted' }).total, 27);
+    db.setWorkPlan(road, { id: ids[0], blockedReason: 'Waiting for road parts' });
+    assert.equal(db.workQueue(owner, { filter: 'blocked' }).total, 1);
+    assert.throws(() => db.workQueue(citizen), /permission/);
+    assert.throws(() => db.workQueue(owner, { filter: 'everything' }), /filter/);
+    assert.throws(() => db.workQueue(owner, { page: -1 }), /page/);
+  } finally { db.close(); }
+});
+
+test('citizen review reminders are timed, once per stage, and stop after feedback', async () => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'civicpulse-reminders-'));
+  const file = path.join(folder, 'cases.sqlite');
+  let db;
+  try {
+    db = await createDatabase(file);
+    const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'Resident', email: 'resident@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    db.manage(owner, { type: 'user', name: 'Road Worker', email: 'road@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+    const road = db.login('road@example.test', 'staff-password-123');
+    const id = db.createComplaint(citizen, sample);
+    db.act(owner, { id, action: 'verify' });
+    db.act(owner, { id, action: 'assign', departmentId: 1 });
+    db.act(road, { id, action: 'start' });
+    db.act(road, { id, action: 'resolve', note: 'Road crossing repaired.', image: sample.image });
+    assert.equal(db.processCitizenReminders().length, 0);
+    db.close(); db = null;
+    const SQL = await initSqlJs({ locateFile: () => require.resolve('sql.js/dist/sql-wasm.wasm') });
+    const setAge = days => {
+      const raw = new SQL.Database(fs.readFileSync(file));
+      raw.run(`UPDATE cycles SET resolved_at=datetime('now','-${days} days') WHERE complaint_id=?`, [id]);
+      fs.writeFileSync(file, Buffer.from(raw.export())); raw.close();
+    };
+    setAge(3);
+    db = await createDatabase(file);
+    assert.equal(db.processCitizenReminders().length, 1);
+    assert.equal(db.processCitizenReminders().length, 0);
+    assert.equal(db.snapshot(citizen).notifications[0].title, 'Review reminder');
+    db.close(); db = null;
+    setAge(8);
+    db = await createDatabase(file);
+    assert.equal(db.processCitizenReminders().length, 1);
+    assert.equal(db.processCitizenReminders().length, 0);
+    assert.equal(db.automaticBackupData().tables.citizen_reminders.length, 2);
+    db.submitFeedback(citizen, { id, rating: 5, resolution: 'Yes', comment: 'The repair is complete.' });
+    assert.equal(db.processCitizenReminders().length, 0);
+    assert.throws(() => db.recordManualBackup(citizen), /permission/);
+    db.recordManualBackup(owner);
+    assert.ok(db.operationsHealth(owner).lastManualBackup.created_at);
+    assert.equal(db.purgeComplaints(owner, { password: 'owner-secret-password', confirm: 'DELETE COMPLAINTS' }).complaints, 1);
+    assert.equal(db.automaticBackupData().tables.citizen_reminders.length, 0);
+  } finally {
+    db?.close();
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+    if (fs.existsSync(folder)) fs.rmdirSync(folder);
+  }
+});
+
 test('approved ward polygons suggest only mapped wards and work plans stay private', async () => {
   const db = await createDatabase(':memory:');
   try {

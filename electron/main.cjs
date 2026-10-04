@@ -106,11 +106,12 @@ app.whenReady().then(async () => {
         case 'wardBoundaryMap': result = database.wardBoundaryMap(actor, payload); break;
         case 'wardSuggestion': result = database.wardSuggestion(actor, payload); break;
         case 'importWardBoundaries': result = database.importWardBoundaries(actor, payload); break;
-        case 'workQueue': result = database.workQueue(actor); break;
+        case 'workQueue': result = database.workQueue(actor, payload); break;
         case 'assignWork': result = database.assignWork(actor, payload); break;
         case 'setWorkPlan': result = database.setWorkPlan(actor, payload); break;
         case 'operationsHealth': result = database.operationsHealth(actor); break;
         case 'recordRecoveryCheck': result = database.recordRecoveryCheck(actor, payload); break;
+        case 'recordManualBackup': result = database.recordManualBackup(actor); break;
         case 'create':
           result = database.createComplaint(actor, payload);
           notify(`Your report C-${1000 + result} was submitted.`);

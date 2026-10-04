@@ -137,7 +137,7 @@ export class CivicState {
       }
       if (url.pathname === '/internal/escalate' && request.headers.get('x-civic-cron') === this.env.BOOTSTRAP_KEY && this.env.BOOTSTRAP_KEY) {
         const after = this.state.storage.sql.exec('SELECT COALESCE(MAX(id),0) AS id FROM notifications').toArray()[0].id;
-        const events = this.store.processEscalations();
+        const events = [...this.store.processEscalations(), ...this.store.processCitizenReminders()];
         this.state.waitUntil(this.deliverNotifications(after));
         return json(200, { ok: true, data: events.length });
       }
@@ -302,11 +302,12 @@ export class CivicState {
         case 'wardBoundaryMap': data = this.store.wardBoundaryMap(user, payload); break;
         case 'wardSuggestion': data = this.store.wardSuggestion(user, payload); break;
         case 'importWardBoundaries': this.rateLimit(request, 'ward-import', 5); data = this.store.importWardBoundaries(user, payload); break;
-        case 'workQueue': data = this.store.workQueue(user); break;
+        case 'workQueue': data = this.store.workQueue(user, payload); break;
         case 'assignWork': data = this.store.assignWork(user, payload); break;
         case 'setWorkPlan': data = this.store.setWorkPlan(user, payload); break;
         case 'operationsHealth': data = { ...this.store.operationsHealth(user), databaseBytes: this.state.storage.sql.databaseSize }; break;
         case 'recordRecoveryCheck': data = this.store.recordRecoveryCheck(user, payload); break;
+        case 'recordManualBackup': data = this.store.recordManualBackup(user); break;
         case 'create': this.rateLimit(request, 'complaint', 8); await verifyTurnstile(this.env, payload.turnstileToken, request.headers.get('x-civic-ip')); data = this.store.createComplaint(user, payload); break;
         case 'action': data = this.store.act(user, payload); break;
         case 'feedback': this.rateLimit(request, 'feedback', 20); data = this.store.submitFeedback(user, payload); break;

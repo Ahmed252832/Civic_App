@@ -8,6 +8,7 @@ import { inDhakaMap, LocationPicker, type MapPoint } from './MapViews';
 import { TurnstileChallenge } from './Turnstile';
 import type { Snapshot, WardBoundary, WardSuggestion } from './types';
 import { wardLabel, wardOptions } from './wards';
+import { loadReferenceBoundaries, suggestReferenceWard } from './wardReference';
 
 type Props = {
   data: Snapshot; onCreated: (id: number) => void; showError: (message: string) => void;
@@ -26,6 +27,7 @@ export default function ReportForm({ data, onCreated, showError, turnstileSiteKe
   const [severity, setSeverity] = useState(saved?.severity || 'Medium');
   const [wardCode, setWardCode] = useState(saved?.wardCode || userWard);
   const [wardTouched, setWardTouched] = useState(Boolean(saved?.wardCode));
+  const [wardConfirmed, setWardConfirmed] = useState(false);
   const [suggestion, setSuggestion] = useState<WardSuggestion | null>(null);
   const [boundaries, setBoundaries] = useState<WardBoundary[]>([]);
   const [showMap, setShowMap] = useState(!lowData);
@@ -48,6 +50,9 @@ export default function ReportForm({ data, onCreated, showError, turnstileSiteKe
     if (!point) { setSuggestion(null); return; }
     let active = true;
     const timer = window.setTimeout(() => { void request<WardSuggestion>('wardSuggestion', point).then(result => {
+      if (result.confidence === 'unmapped') return suggestReferenceWard(point).catch(() => result);
+      return result;
+    }).catch(() => suggestReferenceWard(point)).then(result => {
       if (!active) return;
       setSuggestion(result);
       if (result.code && result.confidence === 'inside' && !wardTouched) setWardCode(result.code);
@@ -57,7 +62,18 @@ export default function ReportForm({ data, onCreated, showError, turnstileSiteKe
   useEffect(() => {
     if (!showMap || !wardCode) { setBoundaries([]); return; }
     let active = true;
-    void request<WardBoundary[]>('wardBoundaryMap', { corporation: wardCode.slice(0, 4) }).then(rows => { if (active) setBoundaries(rows); }).catch(() => { if (active) setBoundaries([]); });
+    const corporation = wardCode.slice(0, 4) as 'DNCC' | 'DSCC';
+    void loadReferenceBoundaries(corporation).then(async base => {
+      if (!active) return;
+      setBoundaries(base);
+      try {
+        const imported = await request<WardBoundary[]>('wardBoundaryMap', { corporation });
+        if (active && imported.length) {
+          const overrides = new Map(imported.map(item => [item.code, item]));
+          setBoundaries(base.map(item => overrides.get(item.code) || item));
+        }
+      } catch { /* Reference outlines remain visible. */ }
+    }).catch(() => { if (active) setBoundaries([]); });
     return () => { active = false; };
   }, [showMap, wardCode.slice(0, 4)]);
 
@@ -68,7 +84,7 @@ export default function ReportForm({ data, onCreated, showError, turnstileSiteKe
       if (!active) return;
       const next = { latitude: coords.latitude, longitude: coords.longitude };
       if (!inDhakaMap(next)) return;
-      setPoint(next); setLatitudeText(next.latitude.toFixed(6)); setLongitudeText(next.longitude.toFixed(6));
+      setPoint(next); setWardConfirmed(false); setLatitudeText(next.latitude.toFixed(6)); setLongitudeText(next.longitude.toFixed(6));
       setLocationNotice(language === 'bn' ? 'আপনার বর্তমান অবস্থান পিন করা হয়েছে। অভিযোগের স্থান ও ওয়ার্ড যাচাই করুন।' : 'Your current location was pinned. Check the issue location and ward before submitting.');
     }, () => {}, { enableHighAccuracy: true, timeout: 12000, maximumAge: 120000 });
     return () => { active = false; };
@@ -97,6 +113,7 @@ export default function ReportForm({ data, onCreated, showError, turnstileSiteKe
 
   const setCoordinates = (latitude: string, longitude: string) => {
     setLatitudeText(latitude); setLongitudeText(longitude);
+    setWardConfirmed(false);
     const next = { latitude: Number(latitude), longitude: Number(longitude) };
     setPoint(latitude.trim() && longitude.trim() && Number.isFinite(next.latitude) && Number.isFinite(next.longitude) && inDhakaMap(next) ? next : null);
   };
@@ -108,13 +125,14 @@ export default function ReportForm({ data, onCreated, showError, turnstileSiteKe
   };
   const discard = () => {
     clearDraft(data.user.id); setTitle(''); setDescription(''); setCategoryId(0); setSeverity('Medium');
-    setWardCode(userWard); setWardTouched(false); setPlaceName(''); setPoint(null); setLatitudeText(''); setLongitudeText(''); setImage(null); setDraftStored(false); setDraftFailed(false);
+    setWardCode(userWard); setWardTouched(false); setWardConfirmed(false); setPlaceName(''); setPoint(null); setLatitudeText(''); setLongitudeText(''); setImage(null); setDraftStored(false); setDraftFailed(false);
   };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!online) return showError(t('Offline — your draft is saved. Submit when connected.'));
     if (!point) return showError(language === 'bn' ? 'ঢাকার ভেতরে একটি অবস্থান বাছুন।' : 'Choose a point inside Dhaka.');
     if (!wardCode) return showError(t('Choose ward'));
+    if (!wardConfirmed) return showError(language === 'bn' ? 'অভিযোগের ওয়ার্ড নিশ্চিত করুন।' : 'Confirm the report ward before submitting.');
     setBusy(true);
     try {
       const id = await request<number>('create', { title, description, categoryId, severity,
@@ -136,9 +154,10 @@ export default function ReportForm({ data, onCreated, showError, turnstileSiteKe
         <label className="wide">{t('Description')}<textarea value={description} onChange={event => setDescription(event.target.value)} minLength={12} rows={4} required /></label>
         <label>{t('Category')}<select value={categoryId} onChange={event => setCategoryId(Number(event.target.value))} required><option value={0}>{t('Choose category')}</option>{data.categories.filter(item => item.active).map(item => <option key={item.id} value={item.id}>{t(item.name)}</option>)}</select></label>
         <label>{t('Severity')}<select value={severity} onChange={event => setSeverity(event.target.value)}>{['Low','Medium','High','Critical'].map(value => <option value={value} key={value}>{t(value)}</option>)}</select></label>
-        <label className="wide">{t('Your ward')}<select value={wardCode} onChange={event => { setWardCode(event.target.value); setWardTouched(true); }} required><option value="">{t('Choose ward')}</option>{['DNCC','DSCC'].map(corporation => <optgroup key={corporation} label={corporation === 'DNCC' ? t('Dhaka North') : t('Dhaka South')}>{wardOptions.filter(item => item.corporation === corporation).map(item => <option key={item.code} value={item.code}>{wardLabel(item.code, language)}</option>)}</optgroup>)}</select></label>
+        <label className="wide">{t('Your ward')}<select value={wardCode} onChange={event => { setWardCode(event.target.value); setWardTouched(true); setWardConfirmed(false); }} required><option value="">{t('Choose ward')}</option>{['DNCC','DSCC'].map(corporation => <optgroup key={corporation} label={corporation === 'DNCC' ? t('Dhaka North') : t('Dhaka South')}>{wardOptions.filter(item => item.corporation === corporation).map(item => <option key={item.code} value={item.code}>{wardLabel(item.code, language)}</option>)}</optgroup>)}</select></label>
+        <label className="wide ward-confirm"><input type="checkbox" checked={wardConfirmed} onChange={event => setWardConfirmed(event.target.checked)} />{language === 'bn' ? 'আমি অভিযোগের স্থান ও এই ওয়ার্ড মিলিয়ে দেখেছি।' : 'I checked the issue location and confirm this ward.'}</label>
       </div>
-      <p className="method-note">{suggestion?.code ? <>{language === 'bn' ? 'মানচিত্রের সীমানা অনুযায়ী সম্ভাব্য ওয়ার্ড' : 'Suggested from the imported ward map'}: <strong>{wardLabel(suggestion.code, language)}</strong>. {suggestion.confidence === 'boundary' ? (language === 'bn' ? 'সীমানার কাছে; সিটি কর্পোরেশনের তথ্য মিলিয়ে নিশ্চিত করুন।' : 'Near a ward boundary; confirm using city corporation guidance.') : (language === 'bn' ? 'জমা দেওয়ার আগে নিশ্চিত করুন।' : 'Confirm before submitting.')}{wardCode !== suggestion.code && <button type="button" className="text-button" onClick={() => { setWardCode(suggestion.code!); setWardTouched(true); }}>{language === 'bn' ? 'এই ওয়ার্ড বাছুন' : 'Use this ward'}</button>}</> : (language === 'bn' ? 'যাচাইকৃত সীমানা না থাকলে অ্যাকাউন্টের ওয়ার্ড আগে বাছা থাকে। অভিযোগের সঠিক ওয়ার্ড নিশ্চিত করুন।' : 'Until approved boundary data is available, your account ward is preselected. Confirm the issue’s correct ward.')}</p>
+      <p className="method-note" role="status">{suggestion?.code ? <>{suggestion.source === 'CivicPulse reference ward outlines' ? (language === 'bn' ? 'রেফারেন্স মানচিত্র অনুযায়ী সম্ভাব্য ওয়ার্ড' : 'Suggested from the reference map') : (language === 'bn' ? 'অনুমোদিত মানচিত্র অনুযায়ী সম্ভাব্য ওয়ার্ড' : 'Suggested from the approved ward map')}: <strong>{wardLabel(suggestion.code, language)}</strong>. {suggestion.confidence === 'boundary' ? (language === 'bn' ? 'সীমানার কাছে; সিটি কর্পোরেশনের তথ্য মিলিয়ে নিশ্চিত করুন।' : 'Near a ward boundary; confirm using city corporation guidance.') : (language === 'bn' ? 'জমা দেওয়ার আগে নিশ্চিত করুন।' : 'Confirm before submitting.')}{wardCode !== suggestion.code && <button type="button" className="text-button" onClick={() => { setWardCode(suggestion.code!); setWardTouched(true); setWardConfirmed(false); }}>{language === 'bn' ? 'এই ওয়ার্ড বাছুন' : 'Use this ward'}</button>}</> : (language === 'bn' ? 'মানচিত্রে ওয়ার্ড নির্ধারণ করা যায়নি। সঠিক ওয়ার্ড নিজে বেছে নিশ্চিত করুন।' : 'The map could not identify this ward. Choose and confirm the correct ward manually.')}</p>
       <div className="ward-guide-links"><a href="/ward-guides/dncc-areas.txt" target="_blank" rel="noreferrer">{language === 'bn' ? 'ঢাকা উত্তরের ওয়ার্ড ও এলাকা দেখুন' : 'North ward and area guide'}</a><a href="/ward-guides/dncc-administrative-map-2018.pdf" target="_blank" rel="noreferrer">{language === 'bn' ? 'উত্তরের ২০১৮ সালের ওয়ার্ড মানচিত্র' : 'North ward map (2018)'}</a><a href="https://www.citypopulation.de/en/bangladesh/dhakanorthcity/admin/" target="_blank" rel="noreferrer">{language === 'bn' ? 'উত্তরের ২০২২ সালের ওয়ার্ড তালিকা ↗' : 'North 2022 ward directory ↗'}</a><a href="/ward-guides/dscc-areas.pdf" target="_blank" rel="noreferrer">{language === 'bn' ? 'ঢাকা দক্ষিণের ওয়ার্ড ও এলাকা দেখুন' : 'South ward and area guide'}</a><a href="https://www.citypopulation.de/en/bangladesh/dhakasouthcity/admin/" target="_blank" rel="noreferrer">{language === 'bn' ? 'দক্ষিণের ২০২২ সালের ওয়ার্ড তালিকা ↗' : 'South 2022 ward directory ↗'}</a></div>
       <p className="method-note">{language === 'bn' ? 'এই তালিকাগুলো পুরোনো হতে পারে। সীমান্তবর্তী জায়গায় সিটি কর্পোরেশনের বর্তমান তথ্য মিলিয়ে নিন।' : 'These source lists may be dated. Check current city corporation guidance for boundary locations.'}</p>
       {locationNotice && <p className="method-note" role="status">{locationNotice}</p>}
@@ -146,7 +165,7 @@ export default function ReportForm({ data, onCreated, showError, turnstileSiteKe
       <div className="form-intro middle"><span className="step">02</span><div><h3>{t('Pin the exact location')}</h3><p>{t('Choose on map or enter coordinates using a keyboard.')}</p></div></div>
       {showMap ? <LocationPicker value={point} onPick={(latitude, longitude) => setCoordinates(latitude.toFixed(6), longitude.toFixed(6))} boundaries={boundaries} /> : <div className="card map-off"><MapPin size={22} /><p>{language === 'bn' ? 'ডাটা সাশ্রয়ের জন্য মানচিত্র বন্ধ আছে। GPS বা নিচের স্থানাঙ্ক ব্যবহার করুন।' : 'The map is paused to save data. Use GPS or the coordinate fields below.'}</p><button type="button" className="secondary" onClick={() => setShowMap(true)}>{language === 'bn' ? 'মানচিত্র চালু করুন' : 'Load map'}</button></div>}
       <div className="form-grid"><label className="wide">{t('Exact place name or nearby landmark')}<input value={placeName} onChange={event => setPlaceName(event.target.value)} minLength={3} maxLength={150} required /></label></div>
-      <div className="form-grid coordinate-inputs"><label>{t('Latitude')}<input type="number" inputMode="decimal" step="any" min="23.68" max="23.92" value={latitudeText} onChange={event => setCoordinates(event.target.value, longitudeText)} /></label><label>{t('Longitude')}<input type="number" inputMode="decimal" step="any" min="90.30" max="90.53" value={longitudeText} onChange={event => setCoordinates(latitudeText, event.target.value)} /></label></div>
+      <div className="form-grid coordinate-inputs"><label>{t('Latitude')}<input type="number" inputMode="decimal" step="any" min="23.65" max="23.94" value={latitudeText} onChange={event => setCoordinates(event.target.value, longitudeText)} /></label><label>{t('Longitude')}<input type="number" inputMode="decimal" step="any" min="90.30" max="90.54" value={longitudeText} onChange={event => setCoordinates(latitudeText, event.target.value)} /></label></div>
       <p className="coordinate" role="status">{point ? `${point.latitude.toFixed(6)}, ${point.longitude.toFixed(6)}` : (language === 'bn' ? 'ঢাকার সেবা এলাকার ভেতরে একটি স্থান বাছুন।' : 'Choose a point inside the Dhaka service area.')}</p>
       {nearby.length > 0 && <div className="duplicate-warning"><strong>{language === 'bn' ? 'কাছাকাছি অনুরূপ অভিযোগ' : 'Similar reports nearby'}</strong>{nearby.map(item => <div key={item.id}>{item.code} · {item.title} · {item.distance} m · {t(item.status)}</div>)}</div>}
       <div className="form-intro middle"><span className="step">03</span><div><h3>{t('Add evidence')}</h3><p>{language === 'bn' ? 'একটি ছবি সমস্যা শনাক্ত করতে সাহায্য করে।' : 'One photo helps the team identify the issue.'}</p></div></div>

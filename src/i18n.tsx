@@ -12,6 +12,7 @@ const translations: Record<string, string> = {
   'Finished': 'সমাপ্ত', 'Closed': 'বন্ধ', 'Reopened': 'পুনরায় খোলা', 'Rejected': 'বাতিল', 'Duplicate': 'পুনরাবৃত্ত অভিযোগ',
   'Low': 'কম', 'Medium': 'মাঝারি', 'High': 'উচ্চ', 'Critical': 'জরুরি', 'Normal': 'স্বাভাবিক', 'Urgent': 'অতিজরুরি',
   'Welcome back': 'আবার স্বাগতম', 'Join your community': 'আপনার এলাকায় যোগ দিন', 'Recover your account': 'অ্যাকাউন্ট ফিরে পান',
+  'Skip to main content': 'মূল অংশে যান', 'Report scope': 'অভিযোগের পরিধি', 'Status': 'অবস্থা', 'What to add': 'কী যোগ করবেন', 'Default department': 'দায়িত্বপ্রাপ্ত বিভাগ', 'Account role': 'অ্যাকাউন্টের ভূমিকা',
   'Full name': 'পুরো নাম', 'Email address': 'ইমেইল ঠিকানা', 'Password': 'পাসওয়ার্ড', 'Sign in': 'প্রবেশ করুন',
   'Create citizen account': 'নাগরিক অ্যাকাউন্ট তৈরি করুন', 'Back to sign in': 'প্রবেশ পাতায় ফিরুন',
   'New citizen? Create an account': 'নতুন নাগরিক? অ্যাকাউন্ট খুলুন', 'Your ward': 'আপনার ওয়ার্ড',
@@ -44,7 +45,7 @@ const translations: Record<string, string> = {
   'Add a photo': 'ছবি যুক্ত করুন', 'Send message': 'বার্তা পাঠান', 'Sending…': 'পাঠানো হচ্ছে…',
   'Only you, administrators and the assigned department can read this conversation.': 'শুধু আপনি, প্রশাসক এবং দায়িত্বপ্রাপ্ত বিভাগ এই কথোপকথন পড়তে পারবেন।',
   'No messages yet. Ask a question or request another photo.': 'এখনও কোনো বার্তা নেই। প্রশ্ন করুন বা আরেকটি ছবি চাইতে পারেন।',
-  'New case message': 'অভিযোগে নতুন বার্তা', 'Please review completed work': 'সম্পন্ন কাজ যাচাই করুন',
+  'New case message': 'অভিযোগে নতুন বার্তা', 'Please review completed work': 'সম্পন্ন কাজ যাচাই করুন', 'Review reminder': 'সম্পন্ন কাজ যাচাইয়ের স্মরণবার্তা',
   'Due soon': 'সময়সীমা কাছাকাছি', 'Overdue': 'সময়সীমা পেরিয়েছে', 'Rework review needed': 'পুনরায় কাজের আবেদন দেখুন',
   'Rework approved': 'পুনরায় কাজ অনুমোদিত', 'Rework declined': 'পুনরায় কাজের আবেদন বাতিল',
   'No notifications yet': 'এখনও কোনো বিজ্ঞপ্তি নেই', 'unread': 'অপঠিত', 'Refresh': 'নতুন তথ্য আনুন',
@@ -253,6 +254,7 @@ export const localizeNotification = (title: string, message: string, language: L
   const localizedTitle = translations[title] || title;
   if (title === 'New case message') return { title: localizedTitle, message: `${code}: ব্যক্তিগত কথোপকথনে নতুন বার্তা আছে। খুলে পড়ুন ও উত্তর দিন।` };
   if (title === 'Please review completed work') return { title: localizedTitle, message: `${code}: বিভাগ কাজ শেষ করেছে। অভিযোগ খুলে যাচাই ও রেটিং দিন।` };
+  if (title === 'Review reminder') return { title: localizedTitle, message: `${code}: সম্পন্ন কাজ দেখে সমস্যাটি সমাধান হয়েছে কি না নিশ্চিত করুন।` };
   if (title === 'Due soon') return { title: localizedTitle, message: `${code}: সমাধানের সময়সীমা কাছাকাছি।` };
   if (title === 'Overdue') return { title: localizedTitle, message: `${code}: সমাধানের সময়সীমা পেরিয়েছে। প্রশাসকের পর্যালোচনা প্রয়োজন।` };
   if (title === 'Rework review needed') return { title: localizedTitle, message: `${code}: নাগরিক জানিয়েছেন সমস্যাটি আবার দেখা দিয়েছে।` };

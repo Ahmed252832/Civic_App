@@ -51,6 +51,8 @@ const { createWebServer } = require('../server/web.cjs');
     await page.getByRole('button', { name: 'Continue to report' }).click();
     assert.equal(await page.getByLabel('Exact place name or nearby landmark').inputValue(), 'Lake bridge east crossing');
     assert.equal(await page.getByLabel('Latitude').inputValue(), '23.746910');
+    await page.getByText('Suggested from the reference map', { exact: false }).waitFor();
+    assert.equal(await page.getByLabel('Your ward').inputValue(), 'DSCC-15');
     await page.locator('.sidebar nav').getByRole('button', { name: 'Issue map' }).click();
     await page.locator('.overview-map .leaflet-interactive').first().click();
     await page.locator('.issue-popup').getByText('Dhanmondi Lake east gate').waitFor();
@@ -94,7 +96,7 @@ const { createWebServer } = require('../server/web.cjs');
         assert.ok(boxes.every(box => box.width >= 24 && box.height >= 24), `${selector} is below the WCAG 2.2 minimum target size at ${width}px`);
       }
     }
-    console.log('Mobile smoke passed: North/South ward boundaries and search, map pin, issue zoom, draft reload, language switch, keyboard coordinates, and mobile layouts.');
+    console.log('Mobile smoke passed: North/South ward boundaries and search, reference ward suggestion, map pin, issue zoom, draft reload, language switch, keyboard coordinates, and mobile layouts.');
   } finally {
     await browser?.close();
     await new Promise(resolve => server.close(resolve));

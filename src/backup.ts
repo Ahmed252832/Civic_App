@@ -69,7 +69,7 @@ export async function verifyEncryptedBackup(file: File, passphrase: string): Pro
 
 export async function testRestoreEncryptedBackup(file: File, passphrase: string): Promise<{ createdAt: string; accounts: number; complaints: number }> {
   const archive = await decodeEncryptedBackup(file, passphrase);
-  const tables = ['departments','categories','users','complaints','updates','cycles','feedback','notifications','escalation_events','reopen_requests','privacy_requests','audit','case_messages','ward_boundaries','recovery_checks','operational_events'];
+  const tables = ['departments','categories','users','complaints','updates','cycles','feedback','notifications','escalation_events','citizen_reminders','reopen_requests','privacy_requests','audit','case_messages','ward_boundaries','recovery_checks','operational_events'];
   for (const table of tables) if (archive.tables[table] !== undefined && !Array.isArray(archive.tables[table])) throw new Error(`Invalid ${table} backup table.`);
   const relation: Record<string, Record<string,string>> = {
     categories: { department_id: 'departments' }, users: { department_id: 'departments' },
@@ -77,6 +77,7 @@ export async function testRestoreEncryptedBackup(file: File, passphrase: string)
     updates: { complaint_id: 'complaints', actor_id: 'users' }, cycles: { complaint_id: 'complaints' },
     feedback: { complaint_id: 'complaints', cycle_id: 'cycles', user_id: 'users' },
     notifications: { user_id: 'users', complaint_id: 'complaints' }, escalation_events: { complaint_id: 'complaints' },
+    citizen_reminders: { cycle_id: 'cycles', complaint_id: 'complaints' },
     reopen_requests: { complaint_id: 'complaints', user_id: 'users' }, privacy_requests: { user_id: 'users' },
     audit: { actor_id: 'users' }, case_messages: { complaint_id: 'complaints', sender_id: 'users' }, recovery_checks: { actor_id: 'users' }
   };
