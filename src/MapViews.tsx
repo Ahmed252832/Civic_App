@@ -1,12 +1,13 @@
 import { useEffect, useMemo } from 'react';
 import { Circle, CircleMarker, MapContainer, Polygon, Popup, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
+import { latLngBounds } from 'leaflet';
 import type { PublicComplaint, WardBoundary } from './types';
 import { useLocale } from './i18n';
 
 export type MapPoint = { latitude: number; longitude: number };
 const center: [number, number] = [23.785, 90.405];
-const dhakaBounds: [[number, number], [number, number]] = [[23.68, 90.30], [23.92, 90.53]];
-export const inDhakaMap = (point: MapPoint) => point.latitude >= 23.68 && point.latitude <= 23.92 && point.longitude >= 90.30 && point.longitude <= 90.53;
+const dhakaBounds: [[number, number], [number, number]] = [[23.65, 90.30], [23.94, 90.54]];
+export const inDhakaMap = (point: MapPoint) => point.latitude >= 23.65 && point.latitude <= 23.94 && point.longitude >= 90.30 && point.longitude <= 90.54;
 const categoryColor = (category: string) => {
   if (/Road|Pothole/i.test(category)) return '#f59e6c';
   if (/Garbage|Waste/i.test(category)) return '#b19aff';
@@ -29,16 +30,31 @@ function FocusPoint({ point, zoom }: { point: MapPoint | null; zoom: number }) {
   return null;
 }
 
-function FocusRegion({ point }: { point: MapPoint | null }) {
+function FocusBoundaries({ boundaries, selectedWardCode }: { boundaries: WardBoundary[]; selectedWardCode: string }) {
   const map = useMap();
-  useEffect(() => { if (point) map.flyTo([point.latitude, point.longitude], 13, { duration: .65 }); }, [map, point]);
+  useEffect(() => {
+    if (!boundaries.length) return;
+    const all = latLngBounds(boundaries.flatMap(boundary => {
+      const polygons = boundary.geometry.type === 'Polygon' ? [boundary.geometry.coordinates as number[][][]] : boundary.geometry.coordinates as number[][][][];
+      return polygons.flatMap(polygon => polygon.flatMap(ring => ring.map(([longitude, latitude]) => [latitude, longitude] as [number, number])));
+    }));
+    if (!all.isValid()) return;
+    map.setMaxBounds(all.pad(.12));
+    const selected = boundaries.find(boundary => boundary.code === selectedWardCode);
+    if (!selected) { map.fitBounds(all, { padding: [16, 16], animate: false }); return; }
+    const geometry = selected.geometry;
+    const polygons = geometry.type === 'Polygon' ? [geometry.coordinates as number[][][]] : geometry.coordinates as number[][][][];
+    const ward = latLngBounds(polygons.flatMap(polygon => polygon.flatMap(ring => ring.map(([longitude, latitude]) => [latitude, longitude] as [number, number]))));
+    if (ward.isValid()) map.fitBounds(ward, { padding: [38, 38], maxZoom: 16, animate: false });
+  }, [map, boundaries, selectedWardCode]);
   return null;
 }
 
-function WardOutlines({ boundaries }: { boundaries: WardBoundary[] }) {
+function WardOutlines({ boundaries, selectedWardCode = '', onSelectWard }: { boundaries: WardBoundary[]; selectedWardCode?: string; onSelectWard?: (code: string) => void }) {
   return <>{boundaries.flatMap(boundary => {
     const polygons = boundary.geometry.type === 'Polygon' ? [boundary.geometry.coordinates as number[][][]] : boundary.geometry.coordinates as number[][][][];
-    return polygons.map((polygon, index) => <Polygon key={`${boundary.code}-${index}`} positions={polygon.map(ring => ring.map(point => [point[1], point[0]] as [number,number]))} pathOptions={{ color: '#89e0c7', weight: 2, fillOpacity: .06 }}><Tooltip>{boundary.code}</Tooltip></Polygon>);
+    const selected = boundary.code === selectedWardCode;
+    return polygons.map((polygon, index) => <Polygon key={`${boundary.code}-${index}`} positions={polygon.map(ring => ring.map(point => [point[1], point[0]] as [number,number]))} bubblingMouseEvents={!onSelectWard} pathOptions={{ color: selected ? '#f5c46d' : '#4eae96', weight: selected ? 3 : 1, opacity: selected ? 1 : .72, fillColor: selected ? '#f5c46d' : '#89e0c7', fillOpacity: selected ? .28 : .025 }} eventHandlers={onSelectWard ? { click: () => onSelectWard(boundary.code) } : undefined}><Tooltip permanent={selected} direction={selected ? 'center' : 'auto'}>{boundary.code.replace('-', ' Ward ')}</Tooltip></Polygon>);
   })}</>;
 }
 
@@ -65,7 +81,7 @@ function IssueMarker({ complaint, onOpen }: { complaint: PublicComplaint; onOpen
   </CircleMarker>;
 }
 
-export function IssueMap({ complaints, mode, onOpen, draftPin, onPick, regionFocus, boundaries = [] }: { complaints: PublicComplaint[]; mode: 'markers' | 'heat'; onOpen: (id: number) => void; draftPin?: MapPoint | null; onPick?: (point: MapPoint) => void; regionFocus?: MapPoint | null; boundaries?: WardBoundary[] }) {
+export function IssueMap({ complaints, mode, onOpen, draftPin, onPick, boundaries = [], selectedWardCode = '', onSelectWard }: { complaints: PublicComplaint[]; mode: 'markers' | 'heat'; onOpen: (id: number) => void; draftPin?: MapPoint | null; onPick?: (point: MapPoint) => void; boundaries?: WardBoundary[]; selectedWardCode?: string; onSelectWard?: (code: string) => void }) {
   const { language } = useLocale();
   const clusters = useMemo(() => {
     const cells = new Map<string, { latitude: number; longitude: number; count: number }>();
@@ -80,8 +96,8 @@ export function IssueMap({ complaints, mode, onOpen, draftPin, onPick, regionFoc
   return <div className="map-frame overview-map" role="group" aria-label={language === 'bn' ? 'অভিযোগের মানচিত্র' : 'Issue map'}><MapContainer center={center} zoom={12} minZoom={11} maxBounds={dhakaBounds} maxBoundsViscosity={1} scrollWheelZoom={true}>
     <TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" />
     {onPick && <ClickHandler onPick={onPick} />}
-    <FocusRegion point={regionFocus || null} />
-    <WardOutlines boundaries={boundaries} />
+    <FocusBoundaries boundaries={boundaries} selectedWardCode={selectedWardCode} />
+    <WardOutlines boundaries={boundaries} selectedWardCode={selectedWardCode} onSelectWard={onSelectWard} />
     <FocusPoint point={draftPin || null} zoom={17} />
     {draftPin && <CircleMarker center={[draftPin.latitude, draftPin.longitude]} radius={11} bubblingMouseEvents={false} pathOptions={{ color: '#ffffff', weight: 3, fillColor: '#20bfa3', fillOpacity: 1 }}><Tooltip permanent direction="top">{language === 'bn' ? 'নতুন অভিযোগের স্থান' : 'New report pin'}</Tooltip></CircleMarker>}
     {mode === 'markers' ? complaints.map(c => <IssueMarker key={c.id} complaint={c} onOpen={onOpen} />) : clusters.map((cluster, index) => <Circle key={index} center={[cluster.latitude, cluster.longitude]}
