@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from 'react';
-import { Circle, CircleMarker, MapContainer, Popup, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
-import type { PublicComplaint } from './types';
+import { Circle, CircleMarker, MapContainer, Polygon, Popup, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
+import type { PublicComplaint, WardBoundary } from './types';
 import { useLocale } from './i18n';
 
 export type MapPoint = { latitude: number; longitude: number };
@@ -35,12 +35,20 @@ function FocusRegion({ point }: { point: MapPoint | null }) {
   return null;
 }
 
-export function LocationPicker({ value, onPick }: { value: MapPoint | null; onPick: (latitude: number, longitude: number) => void }) {
+function WardOutlines({ boundaries }: { boundaries: WardBoundary[] }) {
+  return <>{boundaries.flatMap(boundary => {
+    const polygons = boundary.geometry.type === 'Polygon' ? [boundary.geometry.coordinates as number[][][]] : boundary.geometry.coordinates as number[][][][];
+    return polygons.map((polygon, index) => <Polygon key={`${boundary.code}-${index}`} positions={polygon.map(ring => ring.map(point => [point[1], point[0]] as [number,number]))} pathOptions={{ color: '#89e0c7', weight: 2, fillOpacity: .06 }}><Tooltip>{boundary.code}</Tooltip></Polygon>);
+  })}</>;
+}
+
+export function LocationPicker({ value, onPick, boundaries = [] }: { value: MapPoint | null; onPick: (latitude: number, longitude: number) => void; boundaries?: WardBoundary[] }) {
   const { language } = useLocale();
   return <div className="map-frame picker-map" role="group" aria-label={language === 'bn' ? 'অবস্থান বাছার মানচিত্র' : 'Choose report location on map'}><MapContainer center={value ? [value.latitude, value.longitude] : center} zoom={value ? 17 : 12} minZoom={11} maxBounds={dhakaBounds} maxBoundsViscosity={1} scrollWheelZoom={false}>
     <TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" />
     <ClickHandler onPick={point => onPick(point.latitude, point.longitude)} />
     <FocusPoint point={value} zoom={17} />
+    <WardOutlines boundaries={boundaries} />
     {value && <CircleMarker center={[value.latitude, value.longitude]} radius={10} pathOptions={{ color: '#0e6d5c', fillColor: '#67e0bf', fillOpacity: 1, weight: 3 }} />}
   </MapContainer><span className="map-hint">{language === 'bn' ? 'ঢাকার ভেতরে স্থান বাছুন; নিচে কিবোর্ড দিয়ে স্থানাঙ্কও লিখতে পারেন।' : 'Pin inside Dhaka or enter coordinates below'}</span></div>;
 }
@@ -57,7 +65,7 @@ function IssueMarker({ complaint, onOpen }: { complaint: PublicComplaint; onOpen
   </CircleMarker>;
 }
 
-export function IssueMap({ complaints, mode, onOpen, draftPin, onPick, regionFocus }: { complaints: PublicComplaint[]; mode: 'markers' | 'heat'; onOpen: (id: number) => void; draftPin?: MapPoint | null; onPick?: (point: MapPoint) => void; regionFocus?: MapPoint | null }) {
+export function IssueMap({ complaints, mode, onOpen, draftPin, onPick, regionFocus, boundaries = [] }: { complaints: PublicComplaint[]; mode: 'markers' | 'heat'; onOpen: (id: number) => void; draftPin?: MapPoint | null; onPick?: (point: MapPoint) => void; regionFocus?: MapPoint | null; boundaries?: WardBoundary[] }) {
   const { language } = useLocale();
   const clusters = useMemo(() => {
     const cells = new Map<string, { latitude: number; longitude: number; count: number }>();
@@ -73,6 +81,7 @@ export function IssueMap({ complaints, mode, onOpen, draftPin, onPick, regionFoc
     <TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" />
     {onPick && <ClickHandler onPick={onPick} />}
     <FocusRegion point={regionFocus || null} />
+    <WardOutlines boundaries={boundaries} />
     <FocusPoint point={draftPin || null} zoom={17} />
     {draftPin && <CircleMarker center={[draftPin.latitude, draftPin.longitude]} radius={11} bubblingMouseEvents={false} pathOptions={{ color: '#ffffff', weight: 3, fillColor: '#20bfa3', fillOpacity: 1 }}><Tooltip permanent direction="top">{language === 'bn' ? 'নতুন অভিযোগের স্থান' : 'New report pin'}</Tooltip></CircleMarker>}
     {mode === 'markers' ? complaints.map(c => <IssueMarker key={c.id} complaint={c} onOpen={onOpen} />) : clusters.map((cluster, index) => <Circle key={index} center={[cluster.latitude, cluster.longitude]}

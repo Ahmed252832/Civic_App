@@ -57,7 +57,7 @@ async function sendAlertMail(env, to, title, language = 'en') {
     ? `CivicPulse-এ আপনার অভিযোগের নতুন তথ্য আছে। বিস্তারিত দেখতে ${new URL(env.PUBLIC_APP_URL).origin}/-এ প্রবেশ করুন।`
     : `You have an update in CivicPulse. Sign in at ${new URL(env.PUBLIC_APP_URL).origin}/ to view the details.`;
   const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: env.MAIL_FROM, to: [to], subject: `CivicPulse: ${alertTitle(title, language)}`, text }) });
-  if (!response.ok) console.error('Alert email delivery failed:', response.status);
+  if (!response.ok) throw new Error(`Alert email delivery failed: ${response.status}`);
 }
 
 export class CivicState {
@@ -85,12 +85,12 @@ export class CivicState {
           try {
             const delivered = await sendPushNotification({ endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } }, { title: alertTitle(row.title, row.language), body: row.language === 'bn' ? 'নতুন তথ্য দেখতে CivicPulse খুলুন।' : 'Open CivicPulse to view your update.', url: '/', tag: `civic-${row.id}` }, { publicKey: this.env.VAPID_PUBLIC_KEY, privateKey: this.env.VAPID_PRIVATE_KEY, subject: this.env.VAPID_SUBJECT });
             if (!delivered) this.state.storage.sql.exec('DELETE FROM push_subscriptions WHERE endpoint=?', sub.endpoint);
-          } catch (error) { console.error('Push delivery failed:', error?.statusCode || 'network'); }
+          } catch (error) { console.error('Push delivery failed:', error?.statusCode || 'network'); this.store.recordOperationalEvent('alert_failure', 'Push delivery failed'); }
         }
       }
       if (mailReady(this.env) && row.email_verified) {
         try { await sendAlertMail(this.env, row.email, row.title, row.language); }
-        catch (error) { console.error('Alert email failed:', error instanceof Error ? error.message : 'network'); }
+        catch (error) { console.error('Alert email failed:', error instanceof Error ? error.message : 'network'); this.store.recordOperationalEvent('alert_failure', 'Email delivery failed'); }
       }
     }
   }
@@ -131,6 +131,9 @@ export class CivicState {
       const url = new URL(request.url);
       if (url.pathname === '/internal/backup' && request.headers.get('x-civic-backup') === this.env.BACKUP_ENCRYPTION_KEY && this.env.BACKUP_ENCRYPTION_KEY) {
         return json(200, { ok: true, data: this.store.automaticBackupData() });
+      }
+      if (url.pathname === '/internal/backup-complete' && request.headers.get('x-civic-backup') === this.env.BACKUP_ENCRYPTION_KEY && this.env.BACKUP_ENCRYPTION_KEY) {
+        return json(200, { ok: true, data: this.store.recordOperationalEvent('offsite_backup', request.headers.get('x-civic-backup-name') || '') });
       }
       if (url.pathname === '/internal/escalate' && request.headers.get('x-civic-cron') === this.env.BOOTSTRAP_KEY && this.env.BOOTSTRAP_KEY) {
         const after = this.state.storage.sql.exec('SELECT COALESCE(MAX(id),0) AS id FROM notifications').toArray()[0].id;
@@ -295,6 +298,15 @@ export class CivicState {
         case 'caseMessage': this.rateLimit(request, 'case-message', 40); data = this.store.postCaseMessage(user, payload); break;
         case 'nearby': data = this.store.nearby(user, payload); break;
         case 'nearbyIssues': data = this.store.nearbyIssues(user, payload); break;
+        case 'wardBoundaryStatus': data = this.store.wardBoundaryStatus(user); break;
+        case 'wardBoundaryMap': data = this.store.wardBoundaryMap(user, payload); break;
+        case 'wardSuggestion': data = this.store.wardSuggestion(user, payload); break;
+        case 'importWardBoundaries': this.rateLimit(request, 'ward-import', 5); data = this.store.importWardBoundaries(user, payload); break;
+        case 'workQueue': data = this.store.workQueue(user); break;
+        case 'assignWork': data = this.store.assignWork(user, payload); break;
+        case 'setWorkPlan': data = this.store.setWorkPlan(user, payload); break;
+        case 'operationsHealth': data = { ...this.store.operationsHealth(user), databaseBytes: this.state.storage.sql.databaseSize }; break;
+        case 'recordRecoveryCheck': data = this.store.recordRecoveryCheck(user, payload); break;
         case 'create': this.rateLimit(request, 'complaint', 8); await verifyTurnstile(this.env, payload.turnstileToken, request.headers.get('x-civic-ip')); data = this.store.createComplaint(user, payload); break;
         case 'action': data = this.store.act(user, payload); break;
         case 'feedback': this.rateLimit(request, 'feedback', 20); data = this.store.submitFeedback(user, payload); break;
@@ -357,6 +369,7 @@ export default {
     body.set(encrypted, 18);
     const objectKey = `civicpulse-dhaka/${new Date().toISOString().slice(0, 10)}.cpr2`;
     await env.BACKUP_BUCKET.put(objectKey, body, { httpMetadata: { contentType: 'application/octet-stream' } });
+    await stub.fetch(new Request('https://internal.civicpulse/internal/backup-complete', { headers: { 'x-civic-backup': env.BACKUP_ENCRYPTION_KEY, 'x-civic-backup-name': objectKey } }));
     if (typeof env.BACKUP_BUCKET.list === 'function') {
       const listed = await env.BACKUP_BUCKET.list({ prefix: 'civicpulse-dhaka/', limit: 1000 });
       const backups = listed.objects.filter(object => /^civicpulse-dhaka\/\d{4}-\d{2}-\d{2}\.cpr2$/.test(object.key)).sort((a, b) => b.key.localeCompare(a.key));

@@ -10,6 +10,50 @@ const { decryptBackup, restoreNew } = require('../scripts/restore-backup.cjs');
 
 const sample = { title: 'Broken crossing at the corner', description: 'Vehicles are swerving around the damaged crossing.', categoryId: 2, area: 'DNCC Ward 15', wardCode: 'DNCC-15', placeName: 'Dhanmondi Lake east gate', latitude: 23.7469, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' };
 
+test('approved ward polygons suggest only mapped wards and work plans stay private', async () => {
+  const db = await createDatabase(':memory:');
+  try {
+    const owner = db.bootstrapAdmin({ name: 'Project Owner', email: 'owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'Resident', email: 'resident@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    db.manage(owner, { type: 'user', name: 'Road Worker', email: 'road@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+    db.manage(owner, { type: 'user', name: 'Waste Worker', email: 'waste@example.test', password: 'staff-password-123', role: 'staff', departmentId: 2 });
+    const road = db.login('road@example.test', 'staff-password-123');
+    const waste = db.login('waste@example.test', 'staff-password-123');
+    const polygon = { type: 'FeatureCollection', features: [{ type: 'Feature', properties: { ward_code: 'DNCC-15' }, geometry: { type: 'Polygon', coordinates: [[[90.374,23.745],[90.378,23.745],[90.378,23.749],[90.374,23.749],[90.374,23.745]]] } }] };
+    assert.equal(db.wardSuggestion(citizen, sample).confidence, 'unmapped');
+    assert.throws(() => db.importWardBoundaries(citizen, { corporation: 'DNCC', source: 'DNCC GIS office 2026', geojson: polygon, password: 'citizen-password-123', confirm: 'APPROVED WARD MAP' }), /permission/);
+    assert.throws(() => db.importWardBoundaries(owner, { corporation: 'DNCC', source: 'DNCC GIS office 2026', geojson: polygon, password: 'wrong', confirm: 'APPROVED WARD MAP' }), /password/);
+    assert.equal(db.importWardBoundaries(owner, { corporation: 'DNCC', source: 'DNCC GIS office 2026', geojson: polygon, password: 'owner-secret-password', confirm: 'APPROVED WARD MAP', replace: true }).total, 1);
+    assert.equal(db.wardBoundaryMap(citizen, { corporation: 'DNCC' }).length, 1);
+    assert.deepEqual(db.wardSuggestion(citizen, sample).code, 'DNCC-15');
+    assert.equal(db.wardSuggestion(citizen, { latitude: 23.7489, longitude: 90.3754 }).confidence, 'boundary');
+    assert.equal(db.wardSuggestion(citizen, { latitude: 23.75, longitude: 90.3754 }).confidence, 'unmapped');
+    const id = db.createComplaint(citizen, sample);
+    db.act(owner, { id, action: 'verify' }); db.act(owner, { id, action: 'assign', departmentId: 1 });
+    assert.equal(db.workQueue(road).cases.length, 1);
+    assert.equal(db.workQueue(waste).cases.length, 0);
+    assert.throws(() => db.assignWork(citizen, { id }), /permission/);
+    assert.throws(() => db.assignWork(waste, { id }), /department/);
+    db.assignWork(road, { id });
+    assert.equal(db.workQueue(owner).cases[0].assignee_id, road.id);
+    assert.throws(() => db.setWorkPlan(waste, { id, blockedReason: 'Awaiting parts' }), /case before|department/);
+    db.setWorkPlan(road, { id, blockedReason: 'Awaiting parts', nextActionAt: '2026-10-10T09:00:00.000Z' });
+    assert.equal(db.workQueue(owner).cases[0].blocked_reason, 'Awaiting parts');
+    assert.equal(db.complaintDetail(citizen, { id }).complaint.blocked_reason, null);
+    assert.equal(db.complaintDetail(citizen, { id }).updates.some(row => row.action === 'Updated work plan'), false);
+    const lean = db.complaintDetail(owner, { id, includeImages: false });
+    assert.equal(lean.complaint.image, null);
+    assert.equal(lean.imagesDeferred, true);
+    assert.equal(db.complaintDetail(owner, { id }).complaint.image, sample.image);
+    const health = db.operationsHealth(owner);
+    assert.equal(health.counts.blocked, 1);
+    assert.equal(health.counts.unaccepted, 0);
+    db.recordRecoveryCheck(owner, { createdAt: new Date().toISOString(), accounts: 3, complaints: 1 });
+    assert.equal(db.operationsHealth(owner).lastRecoveryCheck.complaints, 1);
+    assert.equal(db.automaticBackupData().tables.ward_boundaries.length, 1);
+  } finally { db.close(); }
+});
+
 test('nearby issues stay within 2 km and complaint reset preserves accounts and services', async () => {
   const db = await createDatabase(':memory:');
   try {

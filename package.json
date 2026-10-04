@@ -1,7 +1,7 @@
 {
   "name": "civicpulse-desktop",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Connected Dhaka civic complaint desktop and web app",
   "main": "electron/main.cjs",
   "scripts": {

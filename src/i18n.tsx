@@ -5,6 +5,7 @@ const translations: Record<string, string> = {
   'Overview': 'সারসংক্ষেপ', 'Complaints': 'অভিযোগ', 'Report an issue': 'সমস্যা জানান', 'Notifications': 'বিজ্ঞপ্তি',
   'Issue map': 'সমস্যার মানচিত্র', 'Community feedback': 'নাগরিক মতামত', 'Analytics': 'বিশ্লেষণ',
   'Finished work': 'সমাপ্ত কাজ', 'Administration': 'প্রশাসন', 'Account security': 'অ্যাকাউন্ট নিরাপত্তা',
+  'Staff work queue': 'কাজের তালিকা', 'Service health': 'সেবার স্বাস্থ্য',
   'Citizen': 'নাগরিক', 'Department staff': 'বিভাগীয় কর্মী', 'Administrator': 'প্রশাসক', 'Super administrator': 'প্রধান প্রশাসক',
   'Submitted': 'জমা হয়েছে', 'Under Review': 'যাচাই চলছে', 'Verified': 'যাচাই হয়েছে', 'Assigned': 'দায়িত্ব দেওয়া হয়েছে',
   'In Progress': 'কাজ চলছে', 'Awaiting Feedback': 'মতামতের অপেক্ষায়', 'Citizen Verified': 'নাগরিক নিশ্চিত করেছেন',

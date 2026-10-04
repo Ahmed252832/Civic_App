@@ -102,6 +102,15 @@ app.whenReady().then(async () => {
         case 'caseMessage': result = database.postCaseMessage(actor, payload); break;
         case 'nearby': result = database.nearby(actor, payload); break;
         case 'nearbyIssues': result = database.nearbyIssues(actor, payload); break;
+        case 'wardBoundaryStatus': result = database.wardBoundaryStatus(actor); break;
+        case 'wardBoundaryMap': result = database.wardBoundaryMap(actor, payload); break;
+        case 'wardSuggestion': result = database.wardSuggestion(actor, payload); break;
+        case 'importWardBoundaries': result = database.importWardBoundaries(actor, payload); break;
+        case 'workQueue': result = database.workQueue(actor); break;
+        case 'assignWork': result = database.assignWork(actor, payload); break;
+        case 'setWorkPlan': result = database.setWorkPlan(actor, payload); break;
+        case 'operationsHealth': result = database.operationsHealth(actor); break;
+        case 'recordRecoveryCheck': result = database.recordRecoveryCheck(actor, payload); break;
         case 'create':
           result = database.createComplaint(actor, payload);
           notify(`Your report C-${1000 + result} was submitted.`);
