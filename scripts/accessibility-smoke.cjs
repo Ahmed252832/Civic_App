@@ -52,12 +52,27 @@ async function checkControls(page, context) {
         }
         if (role === 'citizen') {
           await page.locator('.sidebar nav').getByRole('button', { name: language === 'bn' ? 'সমস্যা জানান' : 'Report an issue' }).click();
+          await page.getByLabel(language === 'bn' ? 'সমস্যার শিরোনাম' : 'Issue title').fill('Damaged crossing near school');
+          await page.getByLabel(language === 'bn' ? 'বিবরণ' : 'Description').fill('The crossing needs repair before more people are hurt.');
+          await page.getByLabel(language === 'bn' ? 'ধরন' : 'Category').selectOption('1');
+          await page.getByRole('button', { name: language === 'bn' ? 'পরের ধাপ' : 'Continue' }).click();
+          await checkControls(page, role + ' ' + language + ' location');
           const checkbox = page.getByRole('checkbox', { name: language === 'bn' ? 'আমি অভিযোগের স্থান ও এই ওয়ার্ড মিলিয়ে দেখেছি।' : 'I checked the issue location and confirm this ward.' });
           await checkbox.focus();
           await page.keyboard.press('Space');
           assert.equal(await checkbox.isChecked(), true);
           await page.keyboard.press('Space');
           assert.equal(await checkbox.isChecked(), false);
+          await page.getByLabel(language === 'bn' ? 'সঠিক স্থান বা কাছের পরিচিত স্থানের নাম' : 'Exact place name or nearby landmark').fill('Near the school gate');
+          await page.getByLabel(language === 'bn' ? 'অক্ষাংশ' : 'Latitude').fill('23.7469');
+          await page.getByLabel(language === 'bn' ? 'দ্রাঘিমাংশ' : 'Longitude').fill('90.3754');
+          await checkbox.check();
+          await page.getByRole('button', { name: language === 'bn' ? 'পরের ধাপ' : 'Continue' }).click();
+          await checkControls(page, role + ' ' + language + ' photo');
+          await page.getByRole('button', { name: language === 'bn' ? 'পরের ধাপ' : 'Continue' }).click();
+          await checkControls(page, role + ' ' + language + ' review');
+          assert.equal(await page.locator('.report-steps [aria-current=step]').count(), 1, 'Review step remains open until the citizen submits');
+          assert.equal(await page.locator('.drawer-backdrop').count(), 0, 'Continuing from the photo step must not submit');
         }
       }
       await page.close();
