@@ -185,6 +185,8 @@ function createStore(adapter, options = {}) {
   run('CREATE INDEX IF NOT EXISTS complaints_category_resolution ON complaints(category_id,status,resolved_at)');
   run('CREATE INDEX IF NOT EXISTS complaints_geo ON complaints(latitude,longitude)');
   run('CREATE INDEX IF NOT EXISTS updates_complaint_id ON updates(complaint_id,id)');
+  run('CREATE INDEX IF NOT EXISTS replay_complaints_ward_date ON complaints(ward_code,created_at)');
+  run('CREATE INDEX IF NOT EXISTS replay_updates_case_date ON updates(complaint_id,created_at,id)');
   run('CREATE INDEX IF NOT EXISTS feedback_complaint_id ON feedback(complaint_id,id)');
   run('CREATE INDEX IF NOT EXISTS notifications_user_id ON notifications(user_id,id)');
   run('CREATE INDEX IF NOT EXISTS case_messages_complaint_id ON case_messages(complaint_id,id)');
@@ -544,6 +546,37 @@ function createStore(adapter, options = {}) {
         SUM(CASE WHEN c.status NOT IN ('Closed','Citizen Verified','Finished','Rejected','Duplicate') THEN 1 ELSE 0 END) AS open,
         SUM(CASE WHEN c.status='Submitted' THEN 1 ELSE 0 END) AS awaiting
         FROM complaints c WHERE ${access.sql} GROUP BY c.ward_code ORDER BY open DESC,total DESC LIMIT 130`, access.params);
+    },
+    publicReplay(payload = {}) {
+      const corporation = payload.corporation === 'DSCC' ? 'DSCC' : 'DNCC';
+      demand(payload.corporation === undefined || payload.corporation === 'DNCC' || payload.corporation === 'DSCC', 'Choose Dhaka North or South.');
+      const now = new Date();
+      const currentMonth = new Date(now.getTime() + 6 * 3600000).toISOString().slice(0, 7);
+      const month = payload.month === undefined ? currentMonth : String(payload.month);
+      demand(/^20\d{2}-(0[1-9]|1[0-2])$/.test(month) && month <= currentMonth, 'Choose a valid month up to today.');
+      const [year, number] = month.split('-').map(Number);
+      const start = new Date(Date.UTC(year, number - 1, 1) - 6 * 3600000).toISOString().slice(0, 19).replace('T', ' ');
+      const monthEnd = Date.UTC(year, number, 1) - 6 * 3600000;
+      const cutoff = new Date(Math.min(monthEnd, now.getTime() + 1000)).toISOString().slice(0, 19).replace('T', ' ');
+      const rows = all(`WITH history AS (
+        SELECT c.ward_code,c.created_at,c.resolution_due_at,
+          COALESCE((SELECT u.new_status FROM updates u WHERE u.complaint_id=c.id AND u.created_at<? AND u.new_status IS NOT NULL ORDER BY u.created_at DESC,u.id DESC LIMIT 1),'Submitted') AS state
+        FROM complaints c WHERE c.ward_code LIKE ? AND c.created_at<?
+      ) SELECT ward_code AS code,COUNT(*) AS reported,
+        SUM(CASE WHEN created_at>=? THEN 1 ELSE 0 END) AS new_reports,
+        SUM(CASE WHEN state NOT IN ('Closed','Citizen Verified','Finished','Rejected','Duplicate') THEN 1 ELSE 0 END) AS open,
+        SUM(CASE WHEN state IN ('Closed','Citizen Verified','Finished') THEN 1 ELSE 0 END) AS confirmed,
+        SUM(CASE WHEN state NOT IN ('Closed','Citizen Verified','Finished','Rejected','Duplicate') AND resolution_due_at<? THEN 1 ELSE 0 END) AS overdue
+        FROM history GROUP BY ward_code HAVING COUNT(*)>=5 ORDER BY ward_code`, [cutoff, `${corporation}-%`, cutoff, start, cutoff]);
+      const ratings = all(`SELECT c.ward_code AS code,ROUND(AVG(f.rating),1) AS average_rating
+        FROM feedback f JOIN complaints c ON c.id=f.complaint_id
+        WHERE c.ward_code LIKE ? AND f.resolution='Yes' AND f.created_at<?
+        GROUP BY c.ward_code HAVING COUNT(*)>=5`, [`${corporation}-%`, cutoff]);
+      const ratingByWard = new Map(ratings.map(row => [row.code, Number(row.average_rating)]));
+      return { corporation, month, currentMonth, wards: rows.map(row => ({
+        code: row.code, reported: Number(row.reported), newReports: Number(row.new_reports), open: Number(row.open), confirmed: Number(row.confirmed),
+        overdue: month === currentMonth ? Number(row.overdue) : null, averageRating: ratingByWard.get(row.code) ?? null
+      })) };
     },
     summary(user) {
       demand(user, 'Please sign in.');

@@ -10,6 +10,46 @@ const { decryptBackup, restoreNew } = require('../scripts/restore-backup.cjs');
 
 const sample = { title: 'Broken crossing at the corner', description: 'Vehicles are swerving around the damaged crossing.', categoryId: 2, area: 'DNCC Ward 15', wardCode: 'DNCC-15', placeName: 'Dhanmondi Lake east gate', latitude: 23.7469, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' };
 
+test('public replay hides small ward groups and exposes only aggregate history', async () => {
+  const db = await createDatabase(':memory:');
+  try {
+    const owner = db.bootstrapAdmin({ name: 'Owner', email: 'replay-owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'Resident', email: 'replay-resident@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    db.manage(owner, { type: 'user', name: 'Road Worker', email: 'replay-road@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+    const staff = db.login('replay-road@example.test', 'staff-password-123');
+    const month = new Date(Date.now() + 6 * 3600000).toISOString().slice(0, 7);
+    const cases = [];
+    for (let index = 0; index < 5; index++) cases.push(db.createComplaint(citizen, { ...sample, categoryId: 1, title: `Crossing broken near home ${index}` }));
+    for (let index = 0; index < 4; index++) db.createComplaint(citizen, { ...sample, categoryId: 1, wardCode: 'DNCC-16', title: `Private group report ${index}` });
+    const before = db.publicReplay({ corporation: 'DNCC', month });
+    assert.equal(before.wards.length, 1);
+    assert.deepEqual(before.wards[0], { code: 'DNCC-15', reported: 5, newReports: 5, open: 5, confirmed: 0, overdue: 0, averageRating: null });
+    assert.equal(JSON.stringify(before).includes('Crossing broken'), false);
+    assert.equal(JSON.stringify(before).includes('23.7469'), false);
+    const id = cases[0];
+    db.act(owner, { id, action: 'verify' });
+    db.act(owner, { id, action: 'assign', departmentId: 1 });
+    db.act(staff, { id, action: 'start' });
+    db.act(staff, { id, action: 'resolve', note: 'Crossing repaired and checked.', image: sample.image });
+    db.submitFeedback(citizen, { id, rating: 5, resolution: 'Yes', comment: 'Repaired.' });
+    const after = db.publicReplay({ corporation: 'DNCC', month });
+    assert.equal(after.wards[0].open, 4);
+    assert.equal(after.wards[0].confirmed, 1);
+    assert.equal(after.wards[0].averageRating, null);
+    for (const otherId of cases.slice(1)) {
+      db.act(owner, { id: otherId, action: 'verify' });
+      db.act(owner, { id: otherId, action: 'assign', departmentId: 1 });
+      db.act(staff, { id: otherId, action: 'start' });
+      db.act(staff, { id: otherId, action: 'resolve', note: 'Crossing repaired and checked.', image: sample.image });
+      db.submitFeedback(citizen, { id: otherId, rating: 5, resolution: 'Yes', comment: 'Repaired.' });
+    }
+    assert.equal(db.publicReplay({ corporation: 'DNCC', month }).wards[0].averageRating, 5);
+    assert.equal(db.publicReplay({ corporation: 'DSCC', month }).wards.length, 0);
+    assert.throws(() => db.publicReplay({ corporation: 'OTHER', month }), /Dhaka North or South/);
+    assert.throws(() => db.publicReplay({ corporation: 'DNCC', month: '2099-01' }), /valid month/);
+  } finally { db.close(); }
+});
+
 test('staff work pages include older cases and apply role-scoped filters', async () => {
   const db = await createDatabase(':memory:');
   try {

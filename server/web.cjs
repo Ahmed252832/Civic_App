@@ -87,6 +87,7 @@ async function createWebServer(options = {}) {
         const payload = body.payload || {};
         if (method === 'config') return sendJson(res, 200, { ok: true, data: { demoMode: false, browserMode: true, setupRequired: database.setupRequired(), emailEnabled: false, offsiteBackupEnabled: false } });
         if (method === 'session') return sendJson(res, 200, { ok: true, data: sessionUser(req) });
+        if (method === 'publicReplay') return sendJson(res, 200, { ok: true, data: database.publicReplay(payload) });
         if (method === 'forgotPassword' || method === 'requestVerification') throw new Error('Email delivery is only available on the hosted site after a mail provider is configured.');
         if (method === 'verifyEmail') return sendJson(res, 200, { ok: true, data: Boolean(database.consumeAccountToken(payload.token, 'verify')) });
         if (method === 'resetPassword') {

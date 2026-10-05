@@ -15,6 +15,9 @@ test('web API protects reports and revokes disabled staff sessions', async () =>
   };
   try {
     assert.equal((await call('config')).body.data.setupRequired, true);
+    const replay = await call('publicReplay', { corporation: 'DNCC' });
+    assert.equal(replay.response.status, 200);
+    assert.deepEqual(replay.body.data.wards, []);
     assert.equal((await call('publicSnapshot')).response.status, 401);
     assert.equal((await call('areaSummary')).response.status, 401);
     assert.equal((await call('register', { name: 'First Citizen', email: 'first@example.test', area: 'Dhaka', password: 'citizen-password-123' })).body.ok, false);

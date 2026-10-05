@@ -86,6 +86,7 @@ app.whenReady().then(async () => {
       }
       if (method === 'logout') { currentUserId = null; return { ok: true, data: true }; }
       if (method === 'session') return { ok: true, data: user() };
+      if (method === 'publicReplay') return { ok: true, data: database.publicReplay(payload) };
       const actor = requireUser();
       let result;
       switch (method) {

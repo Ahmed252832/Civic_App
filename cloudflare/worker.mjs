@@ -159,6 +159,10 @@ export class CivicState {
       const { method, payload = {} } = JSON.parse(raw);
       if (method === 'config') return json(200, { ok: true, data: { demoMode: false, browserMode: true, setupRequired: this.store.setupRequired(), emailEnabled: mailReady(this.env), offsiteBackupEnabled: Boolean(this.env.BACKUP_BUCKET && this.env.BACKUP_ENCRYPTION_KEY), pushPublicKey: pushReady(this.env) ? this.env.VAPID_PUBLIC_KEY : null, turnstileSiteKey: turnstileReady(this.env) ? this.env.TURNSTILE_SITE_KEY : null } });
       if (method === 'session') return json(200, { ok: true, data: await this.sessionUser(request) });
+      if (method === 'publicReplay') {
+        this.rateLimit(request, 'public-replay', 90);
+        return json(200, { ok: true, data: this.store.publicReplay(payload) });
+      }
       if (method === 'bootstrap') {
         this.rateLimit(request, 'bootstrap', 10);
         if (!this.env.BOOTSTRAP_KEY || payload.key !== this.env.BOOTSTRAP_KEY) throw new Error('Invalid setup key.');

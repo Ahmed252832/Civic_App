@@ -3,7 +3,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from '
 export type Language = 'en' | 'bn';
 const translations: Record<string, string> = {
   'Overview': 'সারসংক্ষেপ', 'Complaints': 'অভিযোগ', 'Report an issue': 'সমস্যা জানান', 'Notifications': 'বিজ্ঞপ্তি',
-  'Issue map': 'সমস্যার মানচিত্র', 'Community feedback': 'নাগরিক মতামত', 'Analytics': 'বিশ্লেষণ',
+  'Issue map': 'সমস্যার মানচিত্র', 'CivicPulse Replay': 'সিভিকপালস রিপ্লে', 'Community feedback': 'নাগরিক মতামত', 'Analytics': 'বিশ্লেষণ',
   'Finished work': 'সমাপ্ত কাজ', 'Administration': 'প্রশাসন', 'Account security': 'অ্যাকাউন্ট নিরাপত্তা',
   'Staff work queue': 'কাজের তালিকা', 'Service health': 'সেবার স্বাস্থ্য',
   'Citizen': 'নাগরিক', 'Department staff': 'বিভাগীয় কর্মী', 'Administrator': 'প্রশাসক', 'Super administrator': 'প্রধান প্রশাসক',
