@@ -88,6 +88,7 @@ async function createWebServer(options = {}) {
         if (method === 'config') return sendJson(res, 200, { ok: true, data: { demoMode: false, browserMode: true, setupRequired: database.setupRequired(), emailEnabled: false, offsiteBackupEnabled: false } });
         if (method === 'session') return sendJson(res, 200, { ok: true, data: sessionUser(req) });
         if (method === 'publicReplay') return sendJson(res, 200, { ok: true, data: database.publicReplay(payload) });
+        if (method === 'publicStreetPulse') return sendJson(res, 200, { ok: true, data: database.publicStreetPulse(payload) });
         if (method === 'forgotPassword' || method === 'requestVerification') throw new Error('Email delivery is only available on the hosted site after a mail provider is configured.');
         if (method === 'verifyEmail') return sendJson(res, 200, { ok: true, data: Boolean(database.consumeAccountToken(payload.token, 'verify')) });
         if (method === 'resetPassword') {
@@ -166,6 +167,9 @@ async function createWebServer(options = {}) {
           case 'setLanguage': result = database.setLanguage(actor, payload); break;
           case 'listComplaints': result = database.listComplaints(actor, payload); break;
           case 'complaintDetail': result = database.complaintDetail(actor, payload); break;
+          case 'streetAlertForComplaint': result = database.streetAlertForComplaint(actor, payload); break;
+          case 'streetAlertAction': result = database.streetAlertAction(actor, payload); break;
+          case 'streetAlertVote': result = database.streetAlertVote(actor, payload); break;
           case 'caseMessage': result = database.postCaseMessage(actor, payload); break;
           case 'nearby': result = database.nearby(actor, payload); break;
           case 'nearbyIssues': result = database.nearbyIssues(actor, payload); break;

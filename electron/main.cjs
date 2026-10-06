@@ -87,6 +87,7 @@ app.whenReady().then(async () => {
       if (method === 'logout') { currentUserId = null; return { ok: true, data: true }; }
       if (method === 'session') return { ok: true, data: user() };
       if (method === 'publicReplay') return { ok: true, data: database.publicReplay(payload) };
+      if (method === 'publicStreetPulse') return { ok: true, data: database.publicStreetPulse(payload) };
       const actor = requireUser();
       let result;
       switch (method) {
@@ -100,6 +101,9 @@ app.whenReady().then(async () => {
         case 'setLanguage': result = database.setLanguage(actor, payload); break;
         case 'listComplaints': result = database.listComplaints(actor, payload); break;
         case 'complaintDetail': result = database.complaintDetail(actor, payload); break;
+        case 'streetAlertForComplaint': result = database.streetAlertForComplaint(actor, payload); break;
+        case 'streetAlertAction': result = database.streetAlertAction(actor, payload); break;
+        case 'streetAlertVote': result = database.streetAlertVote(actor, payload); break;
         case 'caseMessage': result = database.postCaseMessage(actor, payload); break;
         case 'nearby': result = database.nearby(actor, payload); break;
         case 'nearbyIssues': result = database.nearbyIssues(actor, payload); break;

@@ -10,6 +10,45 @@ const { decryptBackup, restoreNew } = require('../scripts/restore-backup.cjs');
 
 const sample = { title: 'Broken crossing at the corner', description: 'Vehicles are swerving around the damaged crossing.', categoryId: 2, area: 'DNCC Ward 15', wardCode: 'DNCC-15', placeName: 'Dhanmondi Lake east gate', latitude: 23.7469, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' };
 
+test('StreetPulse requires reviewed cases and never exposes private report details', async () => {
+  const db = await createDatabase(':memory:');
+  try {
+    const owner = db.bootstrapAdmin({ name: 'Owner', email: 'street-owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'Private Resident', email: 'street-citizen@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    const second = db.register({ name: 'Second Resident', email: 'street-second@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    db.manage(owner, { type: 'user', name: 'Road Worker', email: 'street-road@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+    db.manage(owner, { type: 'user', name: 'Waste Worker', email: 'street-waste@example.test', password: 'staff-password-123', role: 'staff', departmentId: 2 });
+    const road = db.login('street-road@example.test', 'staff-password-123');
+    const waste = db.login('street-waste@example.test', 'staff-password-123');
+    const id = db.createComplaint(citizen, sample);
+    assert.equal(db.publicStreetPulse().length, 0);
+    assert.throws(() => db.streetAlertAction(owner, { id, action: 'publish', hazardType: 'Road damage' }), /Review and verify/);
+    db.act(owner, { id, action: 'verify' });
+    db.act(owner, { id, action: 'assign', departmentId: 1 });
+    assert.throws(() => db.streetAlertAction(waste, { id, action: 'publish', hazardType: 'Road damage' }), /another department/);
+    assert.throws(() => db.streetAlertAction(citizen, { id, action: 'publish', hazardType: 'Road damage' }), /permission/);
+    assert.throws(() => db.streetAlertAction(road, { id, action: 'publish', hazardType: 'Made up' }), /hazard type/);
+    const alert = db.streetAlertAction(road, { id, action: 'publish', hazardType: 'Road damage' });
+    assert.equal(alert.status, 'Active');
+    assert.equal(db.publicStreetPulse({ corporation: 'DSCC' }).length, 0);
+    const publicAlert = db.publicStreetPulse({ corporation: 'DNCC' })[0];
+    assert.equal(publicAlert.hazard_type, 'Road damage');
+    assert.equal(publicAlert.latitude === sample.latitude && publicAlert.longitude === sample.longitude, false);
+    const publicText = JSON.stringify(publicAlert);
+    for (const secret of ['Private Resident', sample.title, sample.description, sample.placeName, sample.image, 'complaint_id', 'reporter_id']) assert.equal(publicText.includes(secret), false);
+    assert.equal(db.streetAlertVote(citizen, { id: publicAlert.id, choice: 'still' }), true);
+    assert.throws(() => db.streetAlertVote(citizen, { id: publicAlert.id, choice: 'still' }), /12 hours/);
+    assert.equal(db.streetAlertVote(second, { id: publicAlert.id, choice: 'still' }), true);
+    assert.equal(db.publicStreetPulse()[0].still_count, 2);
+    assert.equal(db.streetAlertForComplaint(road, { id }).still_count, 2);
+    db.streetAlertAction(road, { id, action: 'clear' });
+    assert.equal(db.publicStreetPulse().length, 0);
+    assert.throws(() => db.streetAlertVote(second, { id: publicAlert.id, choice: 'clear' }), /no longer active/);
+    db.purgeComplaints(owner, { confirm: 'DELETE COMPLAINTS', password: 'owner-secret-password' });
+    assert.equal(db.publicStreetPulse().length, 0);
+  } finally { db.close(); }
+});
+
 test('public replay hides small ward groups and exposes only aggregate history', async () => {
   const db = await createDatabase(':memory:');
   try {
@@ -709,6 +748,9 @@ test('owner backup requires password, pages complete data, and restores a checke
     const worker = db.login('road@backup.test', 'staff-password-123');
     db.act(worker, { id: firstId, action: 'start' });
     db.act(worker, { id: firstId, action: 'resolve', note: 'The damaged area was repaired.', image: sample.image });
+    const streetCaseId = db.listComplaints(owner).complaints.find(item => item.id !== firstId).id;
+    db.act(owner, { id: streetCaseId, action: 'verify' });
+    db.streetAlertAction(owner, { id: streetCaseId, action: 'publish', hazardType: 'Road damage' });
     assert.throws(() => db.beginBackup(citizen, { password: 'citizen-password-123' }), /permission/);
     assert.throws(() => db.beginBackup(owner, { password: 'wrong' }), /Invalid password/);
     const access = db.beginBackup(owner, { password: 'owner-secret-password' });
@@ -725,6 +767,7 @@ test('owner backup requires password, pages complete data, and restores a checke
     assert.equal(tables.complaints.length, 7);
     assert.equal(tables.users.length, 3);
     assert.equal(tables.notifications.length, 1);
+    assert.equal(tables.street_alerts.length, 1);
     assert.ok(tables.users[0].password_hash);
     assert.throws(() => db.backupPage(citizen, { token: access.token, table: 'users' }), /permission/);
     assert.throws(() => db.backupPage(owner, { token: access.token, table: 'sessions' }), /Unknown backup table/);
@@ -738,7 +781,7 @@ test('owner backup requires password, pages complete data, and restores a checke
     const target = path.join(folder, 'restored.sqlite');
     await restoreNew(decryptBackup(bytes, 'test-secret-passphrase'), target);
     const restored = await createDatabase(target);
-    try { assert.equal(restored.listComplaints(owner).total, 7); assert.equal(restored.areaSummary(owner, { query: 'DNCC Ward 15' }).total, 7); assert.equal(restored.login('owner@example.test', 'owner-secret-password').role, 'superadmin'); assert.equal(restored.snapshot(citizen).notifications.length, 1); }
+    try { assert.equal(restored.listComplaints(owner).total, 7); assert.equal(restored.areaSummary(owner, { query: 'DNCC Ward 15' }).total, 7); assert.equal(restored.login('owner@example.test', 'owner-secret-password').role, 'superadmin'); assert.equal(restored.snapshot(citizen).notifications.length, 1); assert.equal(restored.publicStreetPulse().length, 1); }
     finally { restored.close(); }
     const legacyTables = { ...tables }; delete legacyTables.notifications;
     const olderTarget = path.join(folder, 'older-backup.sqlite');

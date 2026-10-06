@@ -3,7 +3,8 @@ const WARD_LIMITS = require('./wards.json');
 const { parseWardFeatures, geometryContains, boundaryDistanceMeters } = require('./ward-geometry.cjs');
 const SEVERITIES = ['Low', 'Medium', 'High', 'Critical'];
 const ACTIVE = ['Submitted', 'Under Review', 'Verified', 'Assigned', 'In Progress', 'Reopened'];
-const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'citizen_reminders', 'reopen_requests', 'privacy_requests', 'audit', 'case_messages', 'ward_boundaries', 'recovery_checks', 'operational_events'];
+const STREET_TYPES = ['Flooding', 'Broken streetlight', 'Blocked walkway', 'Road damage', 'Waste obstruction', 'Other public hazard'];
+const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'citizen_reminders', 'reopen_requests', 'privacy_requests', 'audit', 'case_messages', 'ward_boundaries', 'recovery_checks', 'operational_events', 'street_alerts', 'street_alert_votes'];
 const validWard = value => {
   const match = /^(DNCC|DSCC)-(\d{2})$/.exec(String(value || ''));
   return match && Number(match[2]) >= 1 && Number(match[2]) <= WARD_LIMITS[match[1]];
@@ -161,6 +162,16 @@ function createStore(adapter, options = {}) {
     id INTEGER PRIMARY KEY, actor_id INTEGER NOT NULL REFERENCES users(id), action TEXT NOT NULL,
     target_type TEXT NOT NULL, target_id INTEGER NOT NULL, detail TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
+  run(`CREATE TABLE IF NOT EXISTS street_alerts (
+    id INTEGER PRIMARY KEY, complaint_id INTEGER NOT NULL UNIQUE REFERENCES complaints(id),
+    hazard_type TEXT NOT NULL, ward_code TEXT NOT NULL, latitude REAL NOT NULL, longitude REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Active', published_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, expires_at TEXT NOT NULL, ended_at TEXT)`);
+  run(`CREATE TABLE IF NOT EXISTS street_alert_votes (
+    id INTEGER PRIMARY KEY, alert_id INTEGER NOT NULL REFERENCES street_alerts(id),
+    user_id INTEGER NOT NULL REFERENCES users(id), choice TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(alert_id,user_id))`);
+  run('CREATE INDEX IF NOT EXISTS street_alerts_public ON street_alerts(status,expires_at,ward_code)');
   run('CREATE TABLE IF NOT EXISTS backup_access (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL)');
   if (!all('PRAGMA table_info(users)').some(column => column.name === 'email_verified')) run('ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0');
   const userColumns = new Set(all('PRAGMA table_info(users)').map(column => column.name));
@@ -200,9 +211,12 @@ function createStore(adapter, options = {}) {
   };
   const changeStatus = (complaint, actor, action, status, note = '') => {
     run('UPDATE complaints SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', [status, complaint.id]);
+    if (!['Verified','Assigned','In Progress','Reopened'].includes(status)) run("UPDATE street_alerts SET status='Cleared',ended_at=CURRENT_TIMESTAMP WHERE complaint_id=? AND status='Active'", [complaint.id]);
     log(actor.id, complaint.id, action, complaint.status, status, note);
   };
   const scrubCase = (complaintId, area) => {
+    run('DELETE FROM street_alert_votes WHERE alert_id IN (SELECT id FROM street_alerts WHERE complaint_id=?)', [complaintId]);
+    run('DELETE FROM street_alerts WHERE complaint_id=?', [complaintId]);
     run('UPDATE area_counts SET total=total-1 WHERE area_key=lower(trim(?))', [area]);
     run('DELETE FROM area_counts WHERE area_key=lower(trim(?)) AND total<=0', [area]);
     run("INSERT INTO area_counts (area_key,total) VALUES ('dhaka',1) ON CONFLICT(area_key) DO UPDATE SET total=total+1");
@@ -546,6 +560,82 @@ function createStore(adapter, options = {}) {
         SUM(CASE WHEN c.status NOT IN ('Closed','Citizen Verified','Finished','Rejected','Duplicate') THEN 1 ELSE 0 END) AS open,
         SUM(CASE WHEN c.status='Submitted' THEN 1 ELSE 0 END) AS awaiting
         FROM complaints c WHERE ${access.sql} GROUP BY c.ward_code ORDER BY open DESC,total DESC LIMIT 130`, access.params);
+    },
+    publicStreetPulse(payload = {}) {
+      const corporation = payload.corporation === undefined ? '' : String(payload.corporation);
+      demand(['', 'DNCC', 'DSCC'].includes(corporation), 'Choose Dhaka North or South.');
+      const rows = all(`SELECT a.id,a.hazard_type,a.ward_code,a.latitude,a.longitude,a.created_at,a.expires_at,
+        (SELECT COUNT(*) FROM street_alert_votes v WHERE v.alert_id=a.id AND v.choice='still' AND v.created_at>=datetime('now','-24 hours')) AS still_count,
+        (SELECT COUNT(*) FROM street_alert_votes v WHERE v.alert_id=a.id AND v.choice='clear' AND v.created_at>=datetime('now','-24 hours')) AS clear_count
+        FROM street_alerts a JOIN complaints c ON c.id=a.complaint_id
+        WHERE a.status='Active' AND a.expires_at>CURRENT_TIMESTAMP AND c.retained_at IS NULL
+          AND c.status IN ('Verified','Assigned','In Progress','Reopened')
+          AND (?='' OR a.ward_code LIKE ?)
+        ORDER BY a.created_at DESC,a.id DESC LIMIT 200`, [corporation, `${corporation}-%`]);
+      return rows.map(row => ({ ...row, still_count: Number(row.still_count), clear_count: Number(row.clear_count), radius_metres: 250 }));
+    },
+    streetAlertForComplaint(user, payload) {
+      requireRole(user, ['staff','admin','superadmin']);
+      const complaint = findComplaint(payload.id);
+      demand(user.role !== 'staff' || complaint.department_id === user.departmentId, 'You do not have permission for this case.');
+      const alert = one(`SELECT a.id,a.hazard_type,a.status,a.created_at,a.expires_at,a.ended_at,
+        (SELECT COUNT(*) FROM street_alert_votes v WHERE v.alert_id=a.id AND v.choice='still' AND v.created_at>=datetime('now','-24 hours')) AS still_count,
+        (SELECT COUNT(*) FROM street_alert_votes v WHERE v.alert_id=a.id AND v.choice='clear' AND v.created_at>=datetime('now','-24 hours')) AS clear_count
+        FROM street_alerts a WHERE a.complaint_id=?`, [complaint.id]);
+      return alert || null;
+    },
+    streetAlertAction(user, payload) {
+      requireRole(user, ['staff','admin','superadmin']);
+      const action = String(payload.action || '');
+      demand(['publish','clear','withdraw'].includes(action), 'Choose a valid alert action.');
+      const complaint = findComplaint(payload.id);
+      demand(user.role !== 'staff' || complaint.department_id === user.departmentId, 'This case belongs to another department.');
+      const previous = one('SELECT * FROM street_alerts WHERE complaint_id=?', [complaint.id]);
+      return transact(() => {
+        if (action === 'publish') {
+          const hazard = String(payload.hazardType || '');
+          demand(STREET_TYPES.includes(hazard), 'Choose a public hazard type.');
+          demand(['Verified','Assigned','In Progress','Reopened'].includes(complaint.status) && !complaint.retained_at, 'Review and verify an active complaint before publishing.');
+          demand(validWard(complaint.ward_code), 'This case needs a valid ward before publication.');
+          demand(Number.isFinite(complaint.latitude) && Number.isFinite(complaint.longitude) && inDhaka(complaint.latitude, complaint.longitude), 'This case needs a valid Dhaka location.');
+          demand(!previous || previous.status !== 'Active' || previous.expires_at <= new Date().toISOString().slice(0,19).replace('T',' '), 'This alert is already active.');
+          // A 0.002 degree grid masks the submitted pin; the public map draws a 250 m uncertainty circle.
+          const latitude = Math.round(complaint.latitude / .002) * .002;
+          const longitude = Math.round(complaint.longitude / .002) * .002;
+          if (previous) {
+            run('DELETE FROM street_alert_votes WHERE alert_id=?', [previous.id]);
+            run("UPDATE street_alerts SET hazard_type=?,ward_code=?,latitude=?,longitude=?,status='Active',published_by=?,created_at=CURRENT_TIMESTAMP,expires_at=datetime('now','+48 hours'),ended_at=NULL WHERE id=?", [hazard,complaint.ward_code,latitude,longitude,user.id,previous.id]);
+          } else {
+            run("INSERT INTO street_alerts (complaint_id,hazard_type,ward_code,latitude,longitude,published_by,expires_at) VALUES (?,?,?,?,?,?,datetime('now','+48 hours'))", [complaint.id,hazard,complaint.ward_code,latitude,longitude,user.id]);
+          }
+        } else {
+          demand(previous && previous.status === 'Active', 'No active alert for this case.');
+          run("UPDATE street_alerts SET status=?,ended_at=CURRENT_TIMESTAMP WHERE id=?", [action === 'clear' ? 'Cleared' : 'Withdrawn',previous.id]);
+        }
+        const alertId = previous?.id || one('SELECT id FROM street_alerts WHERE complaint_id=?', [complaint.id]).id;
+        run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,`StreetPulse ${action}`,'street_alert',alertId,complaint.code]);
+        return this.streetAlertForComplaint(user, { id: complaint.id });
+      });
+    },
+    streetAlertVote(user, payload) {
+      requireRole(user, ['citizen']);
+      const alertId = Number(payload.id), choice = String(payload.choice || '');
+      demand(Number.isSafeInteger(alertId) && alertId > 0 && ['still','clear'].includes(choice), 'Choose an alert and a response.');
+      const alert = one(`SELECT a.id FROM street_alerts a JOIN complaints c ON c.id=a.complaint_id
+        WHERE a.id=? AND a.status='Active' AND a.expires_at>CURRENT_TIMESTAMP AND c.retained_at IS NULL
+          AND c.status IN ('Verified','Assigned','In Progress','Reopened')`, [alertId]);
+      demand(alert, 'This alert is no longer active.');
+      const prior = one('SELECT created_at FROM street_alert_votes WHERE alert_id=? AND user_id=?', [alertId,user.id]);
+      demand(!prior || prior.created_at <= new Date(Date.now()-12*3600000).toISOString().slice(0,19).replace('T',' '), 'You can update this alert once every 12 hours.');
+      return transact(() => {
+        run(`INSERT INTO street_alert_votes (alert_id,user_id,choice) VALUES (?,?,?)
+          ON CONFLICT(alert_id,user_id) DO UPDATE SET choice=excluded.choice,created_at=CURRENT_TIMESTAMP`, [alertId,user.id,choice]);
+        // Two independent recent confirmations can keep an alert visible for one more day.
+        if (choice === 'still' && one("SELECT COUNT(*) AS n FROM street_alert_votes WHERE alert_id=? AND choice='still' AND created_at>=datetime('now','-24 hours')", [alertId]).n >= 2) {
+          run("UPDATE street_alerts SET expires_at=MAX(expires_at,datetime('now','+24 hours')) WHERE id=?", [alertId]);
+        }
+        return true;
+      });
     },
     publicReplay(payload = {}) {
       const corporation = payload.corporation === 'DSCC' ? 'DSCC' : 'DNCC';
@@ -955,7 +1045,7 @@ function createStore(adapter, options = {}) {
       demand(saved && typeof payload.password === 'string' && payload.password.length <= 128 && verifyPassword(payload.password, saved.password_hash), 'Current password is incorrect.');
       return transact(() => {
         const count = one('SELECT COUNT(*) AS n FROM complaints').n;
-        for (const table of ['case_messages','notifications','feedback','updates','escalation_events','citizen_reminders','reopen_requests','cycles']) run(`DELETE FROM ${table}`);
+        for (const table of ['street_alert_votes','street_alerts','case_messages','notifications','feedback','updates','escalation_events','citizen_reminders','reopen_requests','cycles']) run(`DELETE FROM ${table}`);
         run('UPDATE complaints SET duplicate_of=NULL, recurrence_of=NULL');
         run('DELETE FROM complaints');
         run('DELETE FROM area_counts');

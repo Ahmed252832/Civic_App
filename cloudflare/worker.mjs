@@ -163,6 +163,10 @@ export class CivicState {
         this.rateLimit(request, 'public-replay', 90);
         return json(200, { ok: true, data: this.store.publicReplay(payload) });
       }
+      if (method === 'publicStreetPulse') {
+        this.rateLimit(request, 'public-streetpulse', 90);
+        return json(200, { ok: true, data: this.store.publicStreetPulse(payload) });
+      }
       if (method === 'bootstrap') {
         this.rateLimit(request, 'bootstrap', 10);
         if (!this.env.BOOTSTRAP_KEY || payload.key !== this.env.BOOTSTRAP_KEY) throw new Error('Invalid setup key.');
@@ -299,6 +303,9 @@ export class CivicState {
         case 'setLanguage': data = this.store.setLanguage(user, payload); break;
         case 'listComplaints': data = this.store.listComplaints(user, payload); break;
         case 'complaintDetail': data = this.store.complaintDetail(user, payload); break;
+        case 'streetAlertForComplaint': data = this.store.streetAlertForComplaint(user, payload); break;
+        case 'streetAlertAction': this.rateLimit(request, 'street-alert-action', 30); data = this.store.streetAlertAction(user, payload); break;
+        case 'streetAlertVote': this.rateLimit(request, 'street-alert-vote', 20); data = this.store.streetAlertVote(user, payload); break;
         case 'caseMessage': this.rateLimit(request, 'case-message', 40); data = this.store.postCaseMessage(user, payload); break;
         case 'nearby': data = this.store.nearby(user, payload); break;
         case 'nearbyIssues': data = this.store.nearbyIssues(user, payload); break;

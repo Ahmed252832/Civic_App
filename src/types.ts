@@ -18,6 +18,7 @@ export type CaseMessage = { id: number; complaint_id: number; sender_id: number;
 export type WardSummary = { code: string | null; total: number; open: number; awaiting: number };
 export type ReplayWard = { code: string; reported: number; newReports: number; open: number; confirmed: number; overdue: number | null; averageRating: number | null };
 export type ReplayFrame = { corporation: 'DNCC' | 'DSCC'; month: string; currentMonth: string; wards: ReplayWard[] };
+export type StreetAlert = { id: number; hazard_type: string; ward_code: string; latitude: number; longitude: number; created_at: string; expires_at: string; still_count: number; clear_count: number; radius_metres: number };
 export type PageResult<T> = { complaints: T[]; nextCursor: number | null; total: number };
 export type AreaSummary = { total: number; cityTotal: number; query: string };
 export type PublicSnapshot = PageResult<PublicComplaint> & { categories: Category[] };
