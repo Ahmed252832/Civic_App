@@ -1,8 +1,9 @@
 import { useEffect, useMemo } from 'react';
 import { Circle, CircleMarker, MapContainer, Polygon, Popup, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
 import { latLngBounds } from 'leaflet';
-import type { PublicComplaint, WardBoundary } from './types';
+import type { NearbyPlace, PublicComplaint, WardBoundary } from './types';
 import { useLocale } from './i18n';
+import { directionsUrl, placeDistance } from './places';
 
 export type MapPoint = { latitude: number; longitude: number };
 const center: [number, number] = [23.785, 90.405];
@@ -33,7 +34,7 @@ function FocusPoint({ point, zoom }: { point: MapPoint | null; zoom: number }) {
 function FocusBoundaries({ boundaries, selectedWardCode }: { boundaries: WardBoundary[]; selectedWardCode: string }) {
   const map = useMap();
   useEffect(() => {
-    if (!boundaries.length) return;
+    if (!boundaries.length) { map.setMaxBounds(dhakaBounds); return; }
     const all = latLngBounds(boundaries.flatMap(boundary => {
       const polygons = boundary.geometry.type === 'Polygon' ? [boundary.geometry.coordinates as number[][][]] : boundary.geometry.coordinates as number[][][][];
       return polygons.flatMap(polygon => polygon.flatMap(ring => ring.map(([longitude, latitude]) => [latitude, longitude] as [number, number])));
@@ -81,7 +82,25 @@ function IssueMarker({ complaint, onOpen }: { complaint: PublicComplaint; onOpen
   </CircleMarker>;
 }
 
-export function IssueMap({ complaints, mode, onOpen, draftPin, onPick, boundaries = [], selectedWardCode = '', onSelectWard }: { complaints: PublicComplaint[]; mode: 'markers' | 'heat'; onOpen: (id: number) => void; draftPin?: MapPoint | null; onPick?: (point: MapPoint) => void; boundaries?: WardBoundary[]; selectedWardCode?: string; onSelectWard?: (code: string) => void }) {
+function PlaceMarker({ place, origin, selected, onSelect, routeMode }: { place: NearbyPlace; origin: MapPoint; selected: boolean; onSelect: (id: string) => void; routeMode: 'walking' | 'driving' }) {
+  const map = useMap();
+  const { language } = useLocale();
+  const bn = language === 'bn';
+  const dial = place.phone?.replace(/[^+0-9]/g, '');
+  return <CircleMarker center={[place.latitude, place.longitude]} radius={selected ? 12 : 9} bubblingMouseEvents={false}
+    pathOptions={{ color: selected ? '#fff2bb' : '#10243a', weight: selected ? 3 : 2, fillColor: place.category === 'police' ? '#75baff' : place.category === 'fire' ? '#ff9b77' : place.category === 'mosque' ? '#8ae0af' : place.category === 'temple' ? '#c9a2ff' : '#ffd477', fillOpacity: 1 }}
+    eventHandlers={{ click: () => { onSelect(place.id); map.flyTo([place.latitude, place.longitude], Math.max(map.getZoom(), 16), { duration: .6 }); } }}>
+    <Tooltip>{place.name}</Tooltip>
+    <Popup><div className="place-popup"><strong>{place.name}</strong><span>{place.address || (bn ? 'ঠিকানা দেওয়া নেই' : 'Address not listed')}</span><small>{placeDistance(place.distanceMeters, language)} {bn ? 'সরলরেখায়' : 'straight-line distance'}</small>
+      {place.phone && dial && <a href={`tel:${dial}`}>{bn ? 'তালিকাভুক্ত ফোন' : 'Listed phone'}: {place.phone}</a>}
+      {place.category === 'police' && <a href="tel:999">{bn ? 'জরুরি সেবা ৯৯৯' : 'Emergency hotline 999'}</a>}
+      {place.category === 'fire' && <a href="tel:102">{bn ? 'ফায়ার সার্ভিস ১০২' : 'Fire service 102'}</a>}
+      <a href={directionsUrl(origin, place, routeMode)} target="_blank" rel="noreferrer">{bn ? 'পথনির্দেশ খুলুন ↗' : 'Open route ↗'}</a>
+    </div></Popup>
+  </CircleMarker>;
+}
+
+export function IssueMap({ complaints, mode, onOpen, draftPin, onPick, boundaries = [], selectedWardCode = '', onSelectWard, places = [], placeOrigin = null, selectedPlace = null, onSelectPlace, routeMode = 'walking' }: { complaints: PublicComplaint[]; mode: 'markers' | 'heat' | 'places'; onOpen: (id: number) => void; draftPin?: MapPoint | null; onPick?: (point: MapPoint) => void; boundaries?: WardBoundary[]; selectedWardCode?: string; onSelectWard?: (code: string) => void; places?: NearbyPlace[]; placeOrigin?: MapPoint | null; selectedPlace?: NearbyPlace | null; onSelectPlace?: (id: string) => void; routeMode?: 'walking' | 'driving' }) {
   const { language } = useLocale();
   const clusters = useMemo(() => {
     const cells = new Map<string, { latitude: number; longitude: number; count: number }>();
@@ -93,16 +112,17 @@ export function IssueMap({ complaints, mode, onOpen, draftPin, onPick, boundarie
     }
     return Array.from(cells.values()).map(c => ({ ...c, latitude: c.latitude / c.count, longitude: c.longitude / c.count }));
   }, [complaints]);
-  return <div className="map-frame overview-map" role="group" aria-label={language === 'bn' ? 'অভিযোগের মানচিত্র' : 'Issue map'}><MapContainer center={center} zoom={12} minZoom={11} maxBounds={dhakaBounds} maxBoundsViscosity={1} scrollWheelZoom={true}>
+  return <div className="map-frame overview-map" role="group" aria-label={mode === 'places' ? (language === 'bn' ? 'কাছের জরুরি ও প্রয়োজনীয় স্থান' : 'Nearby essential places map') : language === 'bn' ? 'অভিযোগের মানচিত্র' : 'Issue map'}><MapContainer center={center} zoom={12} minZoom={11} maxBounds={dhakaBounds} maxBoundsViscosity={1} scrollWheelZoom={true}>
     <TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" />
     {onPick && <ClickHandler onPick={onPick} />}
     <FocusBoundaries boundaries={boundaries} selectedWardCode={selectedWardCode} />
     <WardOutlines boundaries={boundaries} selectedWardCode={selectedWardCode} onSelectWard={onSelectWard} />
-    <FocusPoint point={draftPin || null} zoom={17} />
-    {draftPin && <CircleMarker center={[draftPin.latitude, draftPin.longitude]} radius={11} bubblingMouseEvents={false} pathOptions={{ color: '#ffffff', weight: 3, fillColor: '#20bfa3', fillOpacity: 1 }}><Tooltip permanent direction="top">{language === 'bn' ? 'নতুন অভিযোগের স্থান' : 'New report pin'}</Tooltip></CircleMarker>}
-    {mode === 'markers' ? complaints.map(c => <IssueMarker key={c.id} complaint={c} onOpen={onOpen} />) : clusters.map((cluster, index) => <Circle key={index} center={[cluster.latitude, cluster.longitude]}
+    <FocusPoint point={mode === 'places' ? selectedPlace || placeOrigin : draftPin || null} zoom={mode === 'places' ? 15 : 17} />
+    {mode === 'places' && placeOrigin && <CircleMarker center={[placeOrigin.latitude, placeOrigin.longitude]} radius={11} bubblingMouseEvents={false} pathOptions={{ color: '#ffffff', weight: 3, fillColor: '#20bfa3', fillOpacity: 1 }}><Tooltip permanent direction="top">{language === 'bn' ? 'আপনার শুরুর স্থান' : 'Your starting point'}</Tooltip></CircleMarker>}
+    {mode !== 'places' && draftPin && <CircleMarker center={[draftPin.latitude, draftPin.longitude]} radius={11} bubblingMouseEvents={false} pathOptions={{ color: '#ffffff', weight: 3, fillColor: '#20bfa3', fillOpacity: 1 }}><Tooltip permanent direction="top">{language === 'bn' ? 'নতুন অভিযোগের স্থান' : 'New report pin'}</Tooltip></CircleMarker>}
+    {mode === 'places' ? (placeOrigin && onSelectPlace ? places.map(place => <PlaceMarker key={place.id} place={place} origin={placeOrigin} selected={place.id === selectedPlace?.id} onSelect={onSelectPlace} routeMode={routeMode} />) : null) : mode === 'markers' ? complaints.map(c => <IssueMarker key={c.id} complaint={c} onOpen={onOpen} />) : clusters.map((cluster, index) => <Circle key={index} center={[cluster.latitude, cluster.longitude]}
       radius={Math.min(500, 180 + cluster.count * 75)} pathOptions={{ color: cluster.count >= 3 ? '#ff796e' : cluster.count === 2 ? '#ffa85f' : '#ffce75', weight: 1, fillOpacity: Math.min(.65, .22 + cluster.count * .12) }}>
       <Tooltip>{language === 'bn' ? `কাছাকাছি ${cluster.count}টি অভিযোগ` : `${cluster.count} ${cluster.count === 1 ? 'complaint' : 'complaints'} nearby`}</Tooltip>
     </Circle>)}
-  </MapContainer><span className="map-hint">{onPick ? (language === 'bn' ? 'মানচিত্রে ক্লিক করুন অথবা উপরে স্থানাঙ্ক লিখুন' : 'Click the map or enter coordinates above') : mode === 'markers' ? (language === 'bn' ? 'অভিযোগের চিহ্নে ক্লিক করলে স্থানটি বড় হবে' : 'Click a report pin to zoom to its location') : `${clusters.length} ${language === 'bn' ? 'ভৌগোলিক গুচ্ছ' : 'geographic clusters'}`}</span></div>;
+  </MapContainer><span className="map-hint">{mode === 'places' ? (language === 'bn' ? 'মানচিত্রে ক্লিক করে শুরুর স্থান বদলান; রঙিন চিহ্নে ক্লিক করে বিবরণ দেখুন' : 'Click the map to move your starting point, or click a place marker for details') : onPick ? (language === 'bn' ? 'মানচিত্রে ক্লিক করুন অথবা উপরে স্থানাঙ্ক লিখুন' : 'Click the map or enter coordinates above') : mode === 'markers' ? (language === 'bn' ? 'অভিযোগের চিহ্নে ক্লিক করলে স্থানটি বড় হবে' : 'Click a report pin to zoom to its location') : `${clusters.length} ${language === 'bn' ? 'ভৌগোলিক গুচ্ছ' : 'geographic clusters'}`}</span></div>;
 }

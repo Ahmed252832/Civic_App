@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { createWebServer, complaintCsv } = require('./web.cjs');
 
 test('web API protects reports and revokes disabled staff sessions', async () => {
-  const { server, database } = await createWebServer({ databasePath: ':memory:', setupKey: 'test-setup-key' });
+  const { server, database } = await createWebServer({ databasePath: ':memory:', setupKey: 'test-setup-key', nearbyPlaces: async payload => ({ category: payload.category, radiusMeters: 6000, places: [], partial: false, source: 'test' }) });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   const call = async (method, payload = {}, cookie, origin) => {
@@ -27,6 +27,9 @@ test('web API protects reports and revokes disabled staff sessions', async () =>
     assert.equal((await call('bootstrap', { key: 'test-setup-key', name: 'Second Owner', email: 'second-owner@example.test', password: 'owner-secret-password' })).body.ok, false);
     const citizen = await call('register', { name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     const neighbor = await call('register', { name: 'Second Citizen', email: 'second@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    assert.equal((await call('nearbyPlaces', { latitude: 23.747, longitude: 90.375, category: 'police' })).response.status, 401);
+    assert.equal((await call('nearbyPlaces', { latitude: 23.747, longitude: 90.375, category: 'police' }, owner.cookie)).body.ok, false);
+    assert.equal((await call('nearbyPlaces', { latitude: 23.747, longitude: 90.375, category: 'police' }, citizen.cookie)).body.data.category, 'police');
     assert.equal((await call('snapshot', {}, citizen.cookie, 'http://evil.invalid')).response.status, 403);
     assert.equal((await call('snapshot')).response.status, 401);
     const created = await call('create', { title: 'Crossing curb is broken', description: 'Residents have to step into traffic to pass this curb.', categoryId: 1, area: 'DNCC Ward 15', wardCode: 'DNCC-15', placeName: 'Dhanmondi Lake east gate', latitude: 23.7468, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' }, citizen.cookie);

@@ -17,13 +17,14 @@ import Report from './ReportForm';
 import NearbyIssues from './NearbyIssues';
 import WorkQueuePage from './WorkQueue';
 import RepairMissions from './RepairMissions';
+import NearbyPlacesPanel from './NearbyPlacesPanel';
 import OwnerHealth from './OwnerHealth';
 import CaseJourney, { nextStepLabel } from './CaseJourney';
 import BeforeAfter from './BeforeAfter';
 import RoleGuide from './RoleGuide';
 import CivicReplay from './CivicReplay';
 import StreetPulse from './StreetPulse';
-import type { AreaSummary, Category, Complaint, ComplaintDetail, Department, Feedback, PageResult, Performance, PrivacyRequest, Snapshot, User, WardBoundary } from './types';
+import type { AreaSummary, Category, Complaint, ComplaintDetail, Department, Feedback, NearbyPlacesResult, PageResult, Performance, PlaceCategory, PrivacyRequest, Snapshot, User, WardBoundary } from './types';
 
 type Page = 'dashboard' | 'complaints' | 'report' | 'notifications' | 'map' | 'replay' | 'street' | 'feedback' | 'analytics' | 'performance' | 'manage' | 'health' | 'work' | 'missions' | 'profile';
 const date = (value: string) => new Date(value.replace(' ', 'T') + (value.includes('Z') ? '' : 'Z')).toLocaleDateString(currentLanguage() === 'bn' ? 'bn-BD' : 'en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -214,7 +215,15 @@ function Complaints({ data, onOpen, initialWard, initialScope }: { data: Snapsho
 
 function MapPage({ data, onOpen, onReportAt, showError, lowData }: { data: Snapshot; onOpen: (id: number) => void; onReportAt: (location: MapPoint & { placeName: string }) => void; showError: (message: string) => void; lowData: boolean }) {
   const { language, t } = useLocale();
-  const [mode, setMode] = useState<'markers' | 'heat'>('markers');
+  const [mode, setMode] = useState<'markers' | 'heat' | 'places'>('markers');
+  const [placeCategory, setPlaceCategory] = useState<PlaceCategory>('police');
+  const [placeOrigin, setPlaceOrigin] = useState<MapPoint | null>(null);
+  const [places, setPlaces] = useState<NearbyPlacesResult | null>(null);
+  const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
+  const [placesLoading, setPlacesLoading] = useState(false);
+  const [placesError, setPlacesError] = useState('');
+  const [placesRetry, setPlacesRetry] = useState(0);
+  const [routeMode, setRouteMode] = useState<'walking' | 'driving'>('walking');
   const [category, setCategory] = useState('All categories');
   const [status, setStatus] = useState('All statuses');
   const [wardCode, setWardCode] = useState('');
@@ -255,6 +264,18 @@ function MapPage({ data, onOpen, onReportAt, showError, lowData }: { data: Snaps
   const [accuracy, setAccuracy] = useState<number | null>(null);
   useEffect(() => { setPage({ complaints: data.complaints, nextCursor: data.nextCursor, total: data.summary.counts.total }); }, [data.complaints, data.nextCursor, data.summary.counts.total]);
   const canReport = data.user.role === 'citizen';
+  useEffect(() => {
+    if (!canReport || mode !== 'places' || !placeOrigin) return;
+    let active = true;
+    setPlacesLoading(true); setPlacesError(''); setPlaces(null); setSelectedPlaceId(null);
+    void request<NearbyPlacesResult>('nearbyPlaces', { ...placeOrigin, category: placeCategory }).then(result => {
+      if (!active) return;
+      setPlaces(result); setSelectedPlaceId(result.places[0]?.id || null);
+    }).catch(() => {
+      if (active) setPlacesError(language === 'bn' ? 'কাছের স্থান এখন লোড করা যাচ্ছে না। একটু পরে আবার চেষ্টা করুন।' : 'Nearby places could not load. Please try again shortly.');
+    }).finally(() => { if (active) setPlacesLoading(false); });
+    return () => { active = false; };
+  }, [canReport, mode, placeOrigin?.latitude, placeOrigin?.longitude, placeCategory, placesRetry, language]);
   const filtered = page.complaints.filter(c => (category === 'All categories' || c.category === category) && (status === 'All statuses' || c.status === status) && c.ward_code?.startsWith(`${boundaryCorporation}-`) && (!wardCode || c.ward_code === wardCode));
   const corporationWards = wardOptions.filter(item => item.corporation === boundaryCorporation);
   const searchWard = (event: FormEvent) => {
@@ -267,7 +288,11 @@ function MapPage({ data, onOpen, onReportAt, showError, lowData }: { data: Snaps
     }
     setWardCode(code); setShowMap(true);
   };
-  const choosePoint = (point: MapPoint) => { setDraftPin(point); setLatitudeInput(point.latitude.toFixed(6)); setLongitudeInput(point.longitude.toFixed(6)); setAccuracy(null); setMode('markers'); };
+  const choosePoint = (point: MapPoint) => {
+    if (mode === 'places') { setPlaceOrigin(point); setSelectedPlaceId(null); }
+    else { setDraftPin(point); setMode('markers'); }
+    setLatitudeInput(point.latitude.toFixed(6)); setLongitudeInput(point.longitude.toFixed(6)); setAccuracy(null);
+  };
   const placeKeyboardPin = () => {
     const point = { latitude: Number(latitudeInput), longitude: Number(longitudeInput) };
     if (!latitudeInput.trim() || !longitudeInput.trim() || !Number.isFinite(point.latitude) || !Number.isFinite(point.longitude) || !inDhakaMap(point)) {
@@ -285,36 +310,42 @@ function MapPage({ data, onOpen, onReportAt, showError, lowData }: { data: Snaps
     finally { setBusy(false); }
   };
   const useMyLocation = () => {
-    if (!navigator.geolocation) return showError('This device does not provide a location. Click the map to place a pin.');
+    if (!navigator.geolocation) return showError(language === 'bn' ? 'এই ডিভাইসে অবস্থান পাওয়া যাচ্ছে না। মানচিত্রে ক্লিক করুন বা স্থানাঙ্ক লিখুন।' : 'This device does not provide a location. Click the map or enter coordinates.');
     setLocating(true);
     navigator.geolocation.getCurrentPosition(({ coords }) => {
       setLocating(false);
       const point = { latitude: Number(coords.latitude.toFixed(6)), longitude: Number(coords.longitude.toFixed(6)) };
-      if (!inDhakaMap(point)) return showError('Your detected location is outside the Dhaka city service area. Click the map to choose a location inside Dhaka.');
-      setDraftPin(point);
+      if (!inDhakaMap(point)) return showError(language === 'bn' ? 'আপনার বর্তমান অবস্থান ঢাকার সেবা এলাকার বাইরে। মানচিত্রে ঢাকার একটি স্থান বাছুন।' : 'Your detected location is outside the Dhaka city service area. Choose a location inside Dhaka on the map.');
+      if (mode === 'places') { setPlaceOrigin(point); setSelectedPlaceId(null); }
+      else setDraftPin(point);
       setLatitudeInput(point.latitude.toFixed(6)); setLongitudeInput(point.longitude.toFixed(6));
       setAccuracy(Math.round(coords.accuracy));
-      setMode('markers');
+      if (mode !== 'places') setMode('markers');
     }, error => {
       setLocating(false);
-      showError(error.code === 1 ? 'Location permission was denied. Click the map to place a pin.' : 'Could not detect your location. Click the map to place a pin.');
+      showError(error.code === 1 ? (language === 'bn' ? 'অবস্থান ব্যবহারের অনুমতি দেওয়া হয়নি। মানচিত্রে ক্লিক করুন বা স্থানাঙ্ক লিখুন।' : 'Location permission was denied. Click the map or enter coordinates.') : (language === 'bn' ? 'আপনার অবস্থান পাওয়া যায়নি। মানচিত্রে ক্লিক করুন বা স্থানাঙ্ক লিখুন।' : 'Could not detect your location. Click the map or enter coordinates.'));
     }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 });
   };
+  const selectedPlace = places?.places.find(place => place.id === selectedPlaceId) || null;
+  const mapView = <IssueMap complaints={filtered} mode={mode} onOpen={onOpen} draftPin={draftPin} onPick={canReport ? choosePoint : undefined}
+    boundaries={mode === 'places' ? [] : boundaries} selectedWardCode={wardCode} onSelectWard={canReport ? undefined : setWardCode}
+    places={places?.places || []} placeOrigin={placeOrigin} selectedPlace={selectedPlace} onSelectPlace={setSelectedPlaceId} routeMode={routeMode} />;
+  const mapOrPause = showMap ? mapView : <div className="card map-off"><MapPin size={24} /><p>{language === 'bn' ? 'ডাটা সাশ্রয়ের জন্য মানচিত্র বন্ধ আছে। স্থানাঙ্ক লিখে অভিযোগ করা যাবে।' : 'The map is paused to save data. You can still enter coordinates to report.'}</p><button type="button" className="primary" onClick={() => setShowMap(true)}>{language === 'bn' ? 'মানচিত্র চালু করুন' : 'Load map'}</button></div>;
   return <>
     <SectionHeading eyebrow="GEOGRAPHIC INTELLIGENCE" title="Explore Dhaka" right={<span className="count-pill"><MapPin size={15} /> {t('Dhaka, Bangladesh')}</span>} />
     <div className="map-toolbar">
-      <div className="segmented"><button className={mode === 'markers' ? 'active' : ''} onClick={() => setMode('markers')}><MapPin size={16} /> {t("Issue map")}</button><button className={mode === 'heat' ? 'active' : ''} onClick={() => setMode('heat')}><Activity size={16} /> {t("Density view")}</button></div>
-      <div className="map-filters"><select aria-label={t("Category")} value={category} onChange={e => setCategory(e.target.value)}><option value="All categories">{t("All categories")}</option>{data.categories.map(c => <option key={c.id} value={c.name}>{t(c.name)}</option>)}</select><select aria-label={t("Status")} value={status} onChange={e => setStatus(e.target.value)}>{['All statuses','Submitted','Assigned','In Progress','Awaiting Feedback','Citizen Verified','Finished','Closed','Reopened'].map(x => <option value={x} key={x}>{t(x)}</option>)}</select><select aria-label={language === 'bn' ? 'ওয়ার্ড নির্বাচন করুন' : 'Select ward'} value={wardCode} onChange={event => setWardCode(event.target.value)}><option value="">{t("All wards")}</option>{corporationWards.map(item => <option key={item.code} value={item.code}>{wardLabel(item.code, language)}</option>)}</select></div>
+      <div className="segmented"><button className={mode === 'markers' ? 'active' : ''} onClick={() => setMode('markers')}><MapPin size={16} /> {t("Issue map")}</button><button className={mode === 'heat' ? 'active' : ''} onClick={() => setMode('heat')}><Activity size={16} /> {t("Density view")}</button>{canReport && <button className={mode === 'places' ? 'active' : ''} onClick={() => { setMode('places'); setPlaceOrigin(current => current || draftPin); setShowMap(true); }}><LocateFixed size={16} /> {language === 'bn' ? 'কাছের প্রয়োজনীয় স্থান' : 'Nearby places'}</button>}</div>
+      {mode !== 'places' && <div className="map-filters"><select aria-label={t("Category")} value={category} onChange={e => setCategory(e.target.value)}><option value="All categories">{t("All categories")}</option>{data.categories.map(c => <option key={c.id} value={c.name}>{t(c.name)}</option>)}</select><select aria-label={t("Status")} value={status} onChange={e => setStatus(e.target.value)}>{['All statuses','Submitted','Assigned','In Progress','Awaiting Feedback','Citizen Verified','Finished','Closed','Reopened'].map(x => <option value={x} key={x}>{t(x)}</option>)}</select><select aria-label={language === 'bn' ? 'ওয়ার্ড নির্বাচন করুন' : 'Select ward'} value={wardCode} onChange={event => setWardCode(event.target.value)}><option value="">{t("All wards")}</option>{corporationWards.map(item => <option key={item.code} value={item.code}>{wardLabel(item.code, language)}</option>)}</select></div>}
     </div>
-    <div className="card map-region-guide"><div><strong>{language === 'bn' ? 'ঢাকার সিটি কর্পোরেশন বাছুন' : 'Choose a Dhaka city corporation'}</strong><p className="muted">{boundaries.length ? (language === 'bn' ? `${boundaryCorporation === 'DNCC' ? 'ঢাকা উত্তর' : 'ঢাকা দক্ষিণ'}: ${boundaries.length}টি ওয়ার্ডের সীমানা। ওয়ার্ড খুঁজলে মানচিত্র সরাসরি সেখানে যাবে।` : `${boundaryCorporation === 'DNCC' ? 'Dhaka North' : 'Dhaka South'}: ${boundaries.length} ward outlines. Search a ward to zoom to its boundary.`) : (language === 'bn' ? 'ওয়ার্ড সীমানা লোড হচ্ছে…' : 'Loading ward boundaries…')}</p><form className="map-ward-search" onSubmit={searchWard}><input type="search" inputMode="numeric" value={wardSearch} onChange={event => setWardSearch(event.target.value)} placeholder={language === 'bn' ? 'ওয়ার্ড নম্বর লিখুন, যেমন ২৩' : 'Search ward number, e.g. 23'} aria-label={language === 'bn' ? 'ওয়ার্ড নম্বর খুঁজুন' : 'Search ward number'} /><button type="submit" className="primary"><Search size={16} /> {language === 'bn' ? 'ওয়ার্ডে যান' : 'Go to ward'}</button>{wardCode && <button type="button" className="secondary" onClick={() => { setWardCode(''); setWardSearch(''); }}>{language === 'bn' ? 'পুরো শহর' : 'Whole city'}</button>}</form></div><div className="map-region-actions"><button type="button" className={boundaryCorporation === 'DNCC' ? 'primary' : 'secondary'} aria-pressed={boundaryCorporation === 'DNCC'} onClick={() => focusCorporation('DNCC')}>{language === 'bn' ? 'ঢাকা উত্তর' : 'Dhaka North'}</button><button type="button" className={boundaryCorporation === 'DSCC' ? 'primary' : 'secondary'} aria-pressed={boundaryCorporation === 'DSCC'} onClick={() => focusCorporation('DSCC')}>{language === 'bn' ? 'ঢাকা দক্ষিণ' : 'Dhaka South'}</button><a href="https://www.citypopulation.de/en/bangladesh/dhakanorthcity/admin/" target="_blank" rel="noreferrer">{language === 'bn' ? 'উত্তরের ওয়ার্ড তালিকা ↗' : 'North ward directory ↗'}</a><a href="https://www.citypopulation.de/en/bangladesh/dhakasouthcity/admin/" target="_blank" rel="noreferrer">{language === 'bn' ? 'দক্ষিণের ওয়ার্ড তালিকা ↗' : 'South ward directory ↗'}</a></div></div>
-    {canReport && <div className="map-pin-toolbar"><div><strong>{t("Mark a new issue")}</strong><span>{language === "bn" ? "মানচিত্রে ক্লিক করুন, অবস্থান ব্যবহার করুন অথবা নিচে স্থানাঙ্ক লিখুন।" : "Click the map, use your location, or enter coordinates below."}</span></div><button type="button" className="secondary" onClick={useMyLocation} disabled={locating}><MapPin size={16} /> {locating ? t('Finding location…') : t('Use my location')}</button></div>}
-    {canReport && <div className="card map-keyboard"><label>{t("Latitude")}<input type="number" inputMode="decimal" step="any" min="23.65" max="23.94" value={latitudeInput} onChange={event => setLatitudeInput(event.target.value)} /></label><label>{t("Longitude")}<input type="number" inputMode="decimal" step="any" min="90.30" max="90.54" value={longitudeInput} onChange={event => setLongitudeInput(event.target.value)} /></label><button type="button" className="secondary" onClick={placeKeyboardPin}>{t("Place pin")}</button></div>}
-    {showMap ? <IssueMap complaints={filtered} mode={mode} onOpen={onOpen} draftPin={draftPin} onPick={canReport ? choosePoint : undefined} boundaries={boundaries} selectedWardCode={wardCode} onSelectWard={canReport ? undefined : setWardCode} /> : <div className="card map-off"><MapPin size={24} /><p>{language === 'bn' ? 'ডাটা সাশ্রয়ের জন্য মানচিত্র বন্ধ আছে। স্থানাঙ্ক লিখে অভিযোগ করা যাবে।' : 'The map is paused to save data. You can still enter coordinates to report.'}</p><button type="button" className="primary" onClick={() => setShowMap(true)}>{language === 'bn' ? 'মানচিত্র চালু করুন' : 'Load map'}</button></div>}
-    {canReport && <div className="card map-pin-panel"><div><strong>{draftPin ? t('New report pin selected') : t('Select a point on the map')}</strong><span>{draftPin ? `${draftPin.latitude.toFixed(6)}, ${draftPin.longitude.toFixed(6)}` : t('Your pin will appear here.')}</span>{accuracy !== null && <small>{t('Device accuracy about')} {accuracy} {t('m. Check and move the pin on the map if needed.')}</small>}</div><label>{t("Exact place name or nearby landmark")}<input value={placeName} onChange={e => setPlaceName(e.target.value)} maxLength={150} placeholder={t('e.g. East gate of Dhanmondi Lake')} /></label><button type="button" className="primary" disabled={!draftPin || placeName.trim().length < 3} onClick={() => draftPin && onReportAt({ ...draftPin, placeName: placeName.trim() })}>{t("Continue to report")} <ArrowRight size={16} /></button></div>}
-    <p className="method-note">{language === 'bn' ? 'দেখানো হচ্ছে' : 'Showing'} {page.complaints.length} {language === 'bn' ? 'টি, মোট' : 'of'} {page.total} {t('reports. Filters apply to loaded map points. Exact locations are available only for reports you may access.')}</p>
+    {mode !== 'places' && <div className="card map-region-guide"><div><strong>{language === 'bn' ? 'ঢাকার সিটি কর্পোরেশন বাছুন' : 'Choose a Dhaka city corporation'}</strong><p className="muted">{boundaries.length ? (language === 'bn' ? `${boundaryCorporation === 'DNCC' ? 'ঢাকা উত্তর' : 'ঢাকা দক্ষিণ'}: ${boundaries.length}টি ওয়ার্ডের সীমানা। ওয়ার্ড খুঁজলে মানচিত্র সরাসরি সেখানে যাবে।` : `${boundaryCorporation === 'DNCC' ? 'Dhaka North' : 'Dhaka South'}: ${boundaries.length} ward outlines. Search a ward to zoom to its boundary.`) : (language === 'bn' ? 'ওয়ার্ড সীমানা লোড হচ্ছে…' : 'Loading ward boundaries…')}</p><form className="map-ward-search" onSubmit={searchWard}><input type="search" inputMode="numeric" value={wardSearch} onChange={event => setWardSearch(event.target.value)} placeholder={language === 'bn' ? 'ওয়ার্ড নম্বর লিখুন, যেমন ২৩' : 'Search ward number, e.g. 23'} aria-label={language === 'bn' ? 'ওয়ার্ড নম্বর খুঁজুন' : 'Search ward number'} /><button type="submit" className="primary"><Search size={16} /> {language === 'bn' ? 'ওয়ার্ডে যান' : 'Go to ward'}</button>{wardCode && <button type="button" className="secondary" onClick={() => { setWardCode(''); setWardSearch(''); }}>{language === 'bn' ? 'পুরো শহর' : 'Whole city'}</button>}</form></div><div className="map-region-actions"><button type="button" className={boundaryCorporation === 'DNCC' ? 'primary' : 'secondary'} aria-pressed={boundaryCorporation === 'DNCC'} onClick={() => focusCorporation('DNCC')}>{language === 'bn' ? 'ঢাকা উত্তর' : 'Dhaka North'}</button><button type="button" className={boundaryCorporation === 'DSCC' ? 'primary' : 'secondary'} aria-pressed={boundaryCorporation === 'DSCC'} onClick={() => focusCorporation('DSCC')}>{language === 'bn' ? 'ঢাকা দক্ষিণ' : 'Dhaka South'}</button><a href="https://www.citypopulation.de/en/bangladesh/dhakanorthcity/admin/" target="_blank" rel="noreferrer">{language === 'bn' ? 'উত্তরের ওয়ার্ড তালিকা ↗' : 'North ward directory ↗'}</a><a href="https://www.citypopulation.de/en/bangladesh/dhakasouthcity/admin/" target="_blank" rel="noreferrer">{language === 'bn' ? 'দক্ষিণের ওয়ার্ড তালিকা ↗' : 'South ward directory ↗'}</a></div></div>}
+    {canReport && <div className="map-pin-toolbar"><div><strong>{mode === 'places' ? (language === 'bn' ? 'কাছের প্রয়োজনীয় স্থান খুঁজুন' : 'Find nearby places') : t('Mark a new issue')}</strong><span>{mode === 'places' ? (language === 'bn' ? 'অবস্থান ব্যবহার করুন, মানচিত্রে ক্লিক করুন অথবা নিচে স্থানাঙ্ক লিখুন।' : 'Use your location, click the map, or enter coordinates below.') : language === 'bn' ? 'মানচিত্রে ক্লিক করুন, অবস্থান ব্যবহার করুন অথবা নিচে স্থানাঙ্ক লিখুন।' : 'Click the map, use your location, or enter coordinates below.'}</span></div><button type="button" className="secondary" onClick={useMyLocation} disabled={locating}><MapPin size={16} /> {locating ? t('Finding location…') : t('Use my location')}</button></div>}
+    {canReport && <div className="card map-keyboard"><label>{t("Latitude")}<input type="number" inputMode="decimal" step="any" min="23.65" max="23.94" value={latitudeInput} onChange={event => setLatitudeInput(event.target.value)} /></label><label>{t("Longitude")}<input type="number" inputMode="decimal" step="any" min="90.30" max="90.54" value={longitudeInput} onChange={event => setLongitudeInput(event.target.value)} /></label><button type="button" className="secondary" onClick={placeKeyboardPin}>{mode === 'places' ? (language === 'bn' ? 'এই স্থান থেকে খুঁজুন' : 'Search from this point') : t('Place pin')}</button></div>}
+    {mode === 'places' ? <div className="places-layout">{mapOrPause}<NearbyPlacesPanel category={placeCategory} onCategory={setPlaceCategory} origin={placeOrigin} onLocate={useMyLocation} locating={locating} result={places} loading={placesLoading} error={placesError} onRetry={() => setPlacesRetry(value => value + 1)} selectedId={selectedPlaceId} onSelect={setSelectedPlaceId} routeMode={routeMode} onRouteMode={setRouteMode} /></div> : mapOrPause}
+    {canReport && mode !== 'places' && <div className="card map-pin-panel"><div><strong>{draftPin ? t('New report pin selected') : t('Select a point on the map')}</strong><span>{draftPin ? `${draftPin.latitude.toFixed(6)}, ${draftPin.longitude.toFixed(6)}` : t('Your pin will appear here.')}</span>{accuracy !== null && <small>{t('Device accuracy about')} {accuracy} {t('m. Check and move the pin on the map if needed.')}</small>}</div><label>{t("Exact place name or nearby landmark")}<input value={placeName} onChange={e => setPlaceName(e.target.value)} maxLength={150} placeholder={t('e.g. East gate of Dhanmondi Lake')} /></label><button type="button" className="primary" disabled={!draftPin || placeName.trim().length < 3} onClick={() => draftPin && onReportAt({ ...draftPin, placeName: placeName.trim() })}>{t("Continue to report")} <ArrowRight size={16} /></button></div>}
+    {mode !== 'places' && <><p className="method-note">{language === 'bn' ? 'দেখানো হচ্ছে' : 'Showing'} {page.complaints.length} {language === 'bn' ? 'টি, মোট' : 'of'} {page.total} {t('reports. Filters apply to loaded map points. Exact locations are available only for reports you may access.')}</p>
     <p className="method-note">{language === 'bn' ? 'ওয়ার্ড সীমানার উৎস:' : 'Ward outline source:'} <a href="https://www.arcgisbd.com/server/rest/services/ADB005/CRIIPS/MapServer/346" target="_blank" rel="noreferrer">{language === 'bn' ? 'ঢাকা সিটি কর্পোরেশন পলিগন স্তর' : 'Dhaka City Corporation polygon layer'}</a>. {language === 'bn' ? 'ওয়ার্ড নম্বর উত্তর ও দক্ষিণের জনশুমারি তালিকার সঙ্গে মিলানো হয়েছে; সীমানা ভূমি জরিপের বিকল্প নয়।' : 'Ward numbers were matched to the North and South census directories. Outlines are a map guide, not a land survey.'}</p>
     {page.nextCursor && <button className="secondary load-more" disabled={busy} onClick={() => void loadMore()}>{busy ? (language === 'bn' ? 'লোড হচ্ছে…' : 'Loading…') : (language === 'bn' ? 'আরও মানচিত্রের স্থান দেখুন' : 'Load more map points')}</button>}
-    <div className="map-bottom"><div className="card map-legend"><strong>{t('Issue types')}</strong><span><i style={{background:'#f59e6c'}} /> {t('Roads')}</span><span><i style={{background:'#b19aff'}} /> {t('Waste')}</span><span><i style={{background:'#66b8ff'}} /> {t('Water & drainage')}</span><span><i style={{background:'#ffd277'}} /> {t('Lighting')}</span></div><div className="card map-summary"><strong>{filtered.length} {t('loaded complaints')}</strong><span>{new Set(filtered.map(c => c.area)).size} {t('affected areas')}</span><span>{filtered.filter(c => !['Closed','Citizen Verified','Finished'].includes(c.status)).length} {t('still open')}</span></div></div>
+    <div className="map-bottom"><div className="card map-legend"><strong>{t('Issue types')}</strong><span><i style={{background:'#f59e6c'}} /> {t('Roads')}</span><span><i style={{background:'#b19aff'}} /> {t('Waste')}</span><span><i style={{background:'#66b8ff'}} /> {t('Water & drainage')}</span><span><i style={{background:'#ffd277'}} /> {t('Lighting')}</span></div><div className="card map-summary"><strong>{filtered.length} {t('loaded complaints')}</strong><span>{new Set(filtered.map(c => c.area)).size} {t('affected areas')}</span><span>{filtered.filter(c => !['Closed','Citizen Verified','Finished'].includes(c.status)).length} {t('still open')}</span></div></div></>}
   </>;
 }
 

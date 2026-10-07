@@ -4,6 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { createDatabase } = require('../electron/database.cjs');
+const { nearbyPlaces } = require('../shared/nearby-places.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 const distRoot = path.join(projectRoot, 'dist');
@@ -157,6 +158,10 @@ async function createWebServer(options = {}) {
         if (method === 'purgeComplaints') return sendJson(res, 200, { ok: true, data: database.purgeComplaints(actor, payload) });
         let result;
         switch (method) {
+          case 'nearbyPlaces':
+            if (actor.role !== 'citizen') throw new Error('Only citizens can search nearby places.');
+            result = await (options.nearbyPlaces || nearbyPlaces)(payload);
+            break;
           case 'snapshot': result = database.snapshot(actor); break;
           case 'performance': result = database.performance(actor); break;
             case 'requestReopen': result = database.requestReopen(actor, payload); break;

@@ -1,7 +1,7 @@
 {
   "name": "civicpulse-desktop",
   "private": true,
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Connected Dhaka civic complaint desktop and web app",
   "main": "electron/main.cjs",
   "scripts": {
@@ -14,7 +14,7 @@
     "cloud:deploy": "npm run build && wrangler deploy",
     "package:win": "npm run build && node electron/package-win.cjs",
     "package:mac": "npm run build && electron-builder --mac dmg",
-    "test": "node --test electron/database.test.cjs server/web.test.cjs cloudflare/worker.test.mjs",
+    "test": "node --test electron/database.test.cjs server/web.test.cjs cloudflare/worker.test.mjs shared/nearby-places.test.cjs",
     "smoke": "node electron/ui-smoke.cjs",
     "smoke:cloud": "node electron/cloud-smoke.cjs",
     "smoke:mobile": "node scripts/mobile-smoke.cjs",
@@ -23,6 +23,7 @@
     "smoke:replay": "node scripts/replay-smoke.cjs",
     "smoke:streetpulse": "node scripts/streetpulse-smoke.cjs",
     "smoke:missions": "node scripts/missions-smoke.cjs",
+    "smoke:places": "node scripts/places-smoke.cjs",
     "smoke:package": "node electron/packaged-smoke.cjs"
   },
   "dependencies": {

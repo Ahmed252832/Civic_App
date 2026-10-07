@@ -1,7 +1,9 @@
 import storeModule from '../shared/store.cjs';
+import nearbyModule from '../shared/nearby-places.cjs';
 import { sendPushNotification } from '@mmmike/web-push/send';
 
 const { createStore } = storeModule;
+const { nearbyPlaces } = nearbyModule;
 const SESSION_SECONDS = 8 * 60 * 60;
 const safeHeaders = {
   'X-Content-Type-Options': 'nosniff',
@@ -293,6 +295,11 @@ export class CivicState {
       const notificationsBefore = this.state.storage.sql.exec('SELECT COALESCE(MAX(id),0) AS id FROM notifications').toArray()[0].id;
       let data;
       switch (method) {
+        case 'nearbyPlaces':
+          if (user.role !== 'citizen') throw new Error('Only citizens can search nearby places.');
+          this.rateLimit(request, 'nearby-places', 90);
+          data = await nearbyPlaces(payload);
+          break;
         case 'snapshot': data = this.store.snapshot(user); break;
         case 'performance': data = this.store.performance(user); break;
         case 'requestReopen': data = this.store.requestReopen(user, payload); break;

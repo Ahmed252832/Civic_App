@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, Notification, shell } = require('el
 const path = require('node:path');
 const fs = require('node:fs');
 const { createDatabase } = require('./database.cjs');
+const { nearbyPlaces } = require('../shared/nearby-places.cjs');
 
 let window;
 let database;
@@ -91,6 +92,10 @@ app.whenReady().then(async () => {
       const actor = requireUser();
       let result;
       switch (method) {
+        case 'nearbyPlaces':
+          if (actor.role !== 'citizen') throw new Error('Only citizens can search nearby places.');
+          result = await nearbyPlaces(payload);
+          break;
         case 'snapshot': result = database.snapshot(actor); break;
         case 'performance': result = database.performance(actor); break;
           case 'requestReopen': result = database.requestReopen(actor, payload); break;
