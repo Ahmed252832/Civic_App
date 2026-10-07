@@ -10,6 +10,80 @@ const { decryptBackup, restoreNew } = require('../scripts/restore-backup.cjs');
 
 const sample = { title: 'Broken crossing at the corner', description: 'Vehicles are swerving around the damaged crossing.', categoryId: 2, area: 'DNCC Ward 15', wardCode: 'DNCC-15', placeName: 'Dhanmondi Lake east gate', latitude: 23.7469, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' };
 
+test('repair missions coordinate nearby cases while each citizen reviews only their own outcome', async () => {
+  const db = await createDatabase(':memory:');
+  try {
+    const owner = db.bootstrapAdmin({ name: 'Owner', email: 'mission-owner@example.test', password: 'owner-secret-password' });
+    const first = db.register({ name: 'First Resident', email: 'mission-first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    const second = db.register({ name: 'Second Resident', email: 'mission-second@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    db.manage(owner, { type: 'user', name: 'Road Worker', email: 'mission-road@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+    db.manage(owner, { type: 'user', name: 'Waste Worker', email: 'mission-waste@example.test', password: 'staff-password-123', role: 'staff', departmentId: 2 });
+    const road = db.login('mission-road@example.test', 'staff-password-123');
+    const waste = db.login('mission-waste@example.test', 'staff-password-123');
+    const a = db.createComplaint(first, { ...sample, categoryId: 1, title: 'Damaged road by north crossing' });
+    const b = db.createComplaint(second, { ...sample, categoryId: 2, title: 'Pothole on same road', latitude: 23.7473, longitude: 90.3758 });
+    const far = db.createComplaint(first, { ...sample, categoryId: 1, title: 'Damaged road far away', latitude: 23.7900, longitude: 90.4000 });
+    for (const id of [a,b,far]) { db.act(owner, { id, action: 'verify' }); db.act(owner, { id, action: 'assign', departmentId: 1 }); }
+    assert.deepEqual(db.missionCandidates(road, { anchorId: a }).map(row => row.id).sort((x,y) => x-y), [a,b]);
+    assert.throws(() => db.missionCandidates(waste, { anchorId: a }), /permission/);
+    const input = { caseIds: [a,b], title: 'Repair crossing and nearby pothole', plan: 'Inspect the crossing, repair both defects, then photograph the finished work.' };
+    assert.throws(() => db.createMission(first, input), /permission/);
+    assert.throws(() => db.createMission(road, { ...input, caseIds: [a,far] }), /250 metres/);
+    const missionId = db.createMission(road, input);
+    assert.equal(db.listMissions(road).missions[0].case_count, 2);
+    assert.equal(db.listMissions(waste).total, 0);
+    assert.throws(() => db.missionDetail(first, { id: missionId }), /permission/);
+    assert.throws(() => db.missionDetail(waste, { id: missionId }), /Mission not found/);
+    assert.equal(db.complaintDetail(first, { id: a }).mission.code, db.missionDetail(road, { id: missionId }).code);
+    assert.equal(db.complaintDetail(first, { id: a }).mission.title, undefined);
+    assert.throws(() => db.complaintDetail(first, { id: b }), /Complaint not found/);
+    assert.throws(() => db.createMission(road, input), /ungrouped/);
+    assert.throws(() => db.assignWork(road, { id: a }), /Repair Mission/);
+    db.missionAction(road, { id: missionId, action: 'start' });
+    assert.equal(db.complaintDetail(first, { id: a }).complaint.status, 'In Progress');
+    assert.equal(db.complaintDetail(second, { id: b }).complaint.status, 'In Progress');
+    assert.throws(() => db.act(road, { id: a, action: 'resolve', note: 'Fixed crossing.', image: sample.image }), /Repair Mission/);
+    assert.throws(() => db.missionAction(owner, { id: missionId, action: 'complete', note: 'Both fixed.', image: sample.image }), /assigned department worker/);
+    db.missionAction(road, { id: missionId, action: 'complete', note: 'Both defects repaired and inspected.', image: sample.image });
+    assert.equal(db.listMissions(road).total, 0);
+    assert.equal(db.listMissions(road, { scope: 'history' }).missions[0].status, 'Completed');
+    assert.equal(db.complaintDetail(first, { id: a }).complaint.status, 'Awaiting Feedback');
+    assert.equal(db.complaintDetail(second, { id: b }).complaint.status, 'Awaiting Feedback');
+    assert.equal(db.snapshot(first).notifications.some(item => item.complaint_id === a), true);
+    assert.equal(db.snapshot(second).notifications.some(item => item.complaint_id === b), true);
+    db.submitFeedback(first, { id: a, rating: 5, resolution: 'Yes', comment: 'Crossing fixed.' });
+    db.submitFeedback(second, { id: b, rating: 2, resolution: 'No', comment: 'Pothole remains.' });
+    assert.equal(db.complaintDetail(first, { id: a }).complaint.status, 'Citizen Verified');
+    assert.equal(db.complaintDetail(second, { id: b }).complaint.status, 'Awaiting Feedback');
+    assert.equal(db.listMissions(road, { scope: 'history' }).missions[0].confirmed_count, 1);
+    db.purgeComplaints(owner, { confirm: 'DELETE COMPLAINTS', password: 'owner-secret-password' });
+    assert.equal(db.listMissions(road, { scope: 'history' }).total, 0);
+  } finally { db.close(); }
+});
+
+test('cancelling a started repair mission restores individual cases with a recorded reason', async () => {
+  const db = await createDatabase(':memory:');
+  try {
+    const owner = db.bootstrapAdmin({ name: 'Owner', email: 'cancel-owner@example.test', password: 'owner-secret-password' });
+    const citizen = db.register({ name: 'Resident', email: 'cancel-citizen@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    db.manage(owner, { type: 'user', name: 'Road Worker', email: 'cancel-road@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
+    const worker = db.login('cancel-road@example.test', 'staff-password-123');
+    const ids = [0,1].map(n => db.createComplaint(citizen, { ...sample, categoryId: 1, title: `Repair site ${n}`, latitude: sample.latitude + n * .0001 }));
+    for (const id of ids) { db.act(owner, { id, action: 'verify' }); db.act(owner, { id, action: 'assign', departmentId: 1 }); }
+    const missionId = db.createMission(worker, { caseIds: ids, title: 'Repair both sites', plan: 'Inspect both sites and repair the road surface.' });
+    db.missionAction(worker, { id: missionId, action: 'start' });
+    assert.throws(() => db.missionAction(worker, { id: missionId, action: 'cancel', reason: 'Materials unavailable' }), /Only administrators/);
+    db.missionAction(owner, { id: missionId, action: 'cancel', reason: 'The work sites need separate repair plans.' });
+    for (const id of ids) {
+      const detail = db.complaintDetail(citizen, { id });
+      assert.equal(detail.complaint.status, 'Assigned');
+      assert.equal(detail.updates.some(item => item.action === 'Repair mission cancelled'), true);
+    }
+    assert.equal(db.listMissions(worker, { scope: 'history' }).missions[0].status, 'Cancelled');
+    assert.equal(db.missionCandidates(worker, { anchorId: ids[0] }).length, 2);
+  } finally { db.close(); }
+});
+
 test('StreetPulse requires reviewed cases and never exposes private report details', async () => {
   const db = await createDatabase(':memory:');
   try {
@@ -751,6 +825,9 @@ test('owner backup requires password, pages complete data, and restores a checke
     const streetCaseId = db.listComplaints(owner).complaints.find(item => item.id !== firstId).id;
     db.act(owner, { id: streetCaseId, action: 'verify' });
     db.streetAlertAction(owner, { id: streetCaseId, action: 'publish', hazardType: 'Road damage' });
+    const missionIds = db.listComplaints(owner).complaints.filter(item => item.id !== firstId && item.id !== streetCaseId).slice(0, 2).map(item => item.id);
+    for (const id of missionIds) { db.act(owner, { id, action: 'verify' }); db.act(owner, { id, action: 'assign', departmentId: 1 }); }
+    const missionId = db.createMission(worker, { caseIds: missionIds, title: 'Repair nearby crossings', plan: 'Inspect both crossings, repair the hazards and check the work.' });
     assert.throws(() => db.beginBackup(citizen, { password: 'citizen-password-123' }), /permission/);
     assert.throws(() => db.beginBackup(owner, { password: 'wrong' }), /Invalid password/);
     const access = db.beginBackup(owner, { password: 'owner-secret-password' });
@@ -768,6 +845,8 @@ test('owner backup requires password, pages complete data, and restores a checke
     assert.equal(tables.users.length, 3);
     assert.equal(tables.notifications.length, 1);
     assert.equal(tables.street_alerts.length, 1);
+    assert.equal(tables.missions.length, 1);
+    assert.equal(tables.mission_cases.length, 2);
     assert.ok(tables.users[0].password_hash);
     assert.throws(() => db.backupPage(citizen, { token: access.token, table: 'users' }), /permission/);
     assert.throws(() => db.backupPage(owner, { token: access.token, table: 'sessions' }), /Unknown backup table/);
@@ -781,7 +860,7 @@ test('owner backup requires password, pages complete data, and restores a checke
     const target = path.join(folder, 'restored.sqlite');
     await restoreNew(decryptBackup(bytes, 'test-secret-passphrase'), target);
     const restored = await createDatabase(target);
-    try { assert.equal(restored.listComplaints(owner).total, 7); assert.equal(restored.areaSummary(owner, { query: 'DNCC Ward 15' }).total, 7); assert.equal(restored.login('owner@example.test', 'owner-secret-password').role, 'superadmin'); assert.equal(restored.snapshot(citizen).notifications.length, 1); assert.equal(restored.publicStreetPulse().length, 1); }
+    try { assert.equal(restored.listComplaints(owner).total, 7); assert.equal(restored.areaSummary(owner, { query: 'DNCC Ward 15' }).total, 7); assert.equal(restored.login('owner@example.test', 'owner-secret-password').role, 'superadmin'); assert.equal(restored.snapshot(citizen).notifications.length, 1); assert.equal(restored.publicStreetPulse().length, 1); assert.equal(restored.missionDetail(worker, { id: missionId }).cases.length, 2); }
     finally { restored.close(); }
     const legacyTables = { ...tables }; delete legacyTables.notifications;
     const olderTarget = path.join(folder, 'older-backup.sqlite');

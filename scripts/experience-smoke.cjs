@@ -37,7 +37,7 @@ const { createWebServer } = require('../server/web.cjs');
     await citizenPage.getByRole('button', { name: 'Close guide' }).click();
     await citizenPage.locator('.sidebar nav').getByRole('button', { name: 'Complaints' }).click();
     await citizenPage.getByRole('button', { name: /Broken footpath near school/ }).click();
-    await citizenPage.getByText('Check the completed work, then confirm and rate it.').waitFor();
+    await citizenPage.getByRole('heading', { name: 'Check the completed work, then confirm and rate it.' }).waitFor();
     const comparison = citizenPage.getByRole('region', { name: 'Before and after repair' });
     await comparison.getByText('Before and after').waitFor();
     assert.equal(await comparison.locator('img').count(), 2);

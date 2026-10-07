@@ -8,7 +8,7 @@ const safeHeaders = {
   'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=(self)',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
-  'Content-Security-Policy': "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://tile.openstreetmap.org; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tile.openstreetmap.org; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 };
 const json = (status, body, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...safeHeaders, ...headers } });
 const csvCell = value => {
@@ -314,6 +314,11 @@ export class CivicState {
         case 'wardSuggestion': data = this.store.wardSuggestion(user, payload); break;
         case 'importWardBoundaries': this.rateLimit(request, 'ward-import', 5); data = this.store.importWardBoundaries(user, payload); break;
         case 'workQueue': data = this.store.workQueue(user, payload); break;
+        case 'missionCandidates': data = this.store.missionCandidates(user, payload); break;
+        case 'listMissions': data = this.store.listMissions(user, payload); break;
+        case 'missionDetail': data = this.store.missionDetail(user, payload); break;
+        case 'createMission': this.rateLimit(request, 'mission-create', 20); data = this.store.createMission(user, payload); break;
+        case 'missionAction': this.rateLimit(request, 'mission-action', 40); data = this.store.missionAction(user, payload); break;
         case 'assignWork': data = this.store.assignWork(user, payload); break;
         case 'setWorkPlan': data = this.store.setWorkPlan(user, payload); break;
         case 'operationsHealth': data = { ...this.store.operationsHealth(user), databaseBytes: this.state.storage.sql.databaseSize }; break;
@@ -331,7 +336,7 @@ export class CivicState {
         case 'endBackup': data = this.store.endBackup(user, payload); break;
         default: throw new Error('Unknown request.');
       }
-      if (['action','feedback','requestReopen','decideReopen','caseMessage'].includes(method)) this.state.waitUntil(this.deliverNotifications(notificationsBefore));
+      if (['action','feedback','requestReopen','decideReopen','caseMessage','missionAction'].includes(method)) this.state.waitUntil(this.deliverNotifications(notificationsBefore));
       return json(200, { ok: true, data });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

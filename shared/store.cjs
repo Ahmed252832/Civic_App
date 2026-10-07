@@ -4,7 +4,7 @@ const { parseWardFeatures, geometryContains, boundaryDistanceMeters } = require(
 const SEVERITIES = ['Low', 'Medium', 'High', 'Critical'];
 const ACTIVE = ['Submitted', 'Under Review', 'Verified', 'Assigned', 'In Progress', 'Reopened'];
 const STREET_TYPES = ['Flooding', 'Broken streetlight', 'Blocked walkway', 'Road damage', 'Waste obstruction', 'Other public hazard'];
-const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'citizen_reminders', 'reopen_requests', 'privacy_requests', 'audit', 'case_messages', 'ward_boundaries', 'recovery_checks', 'operational_events', 'street_alerts', 'street_alert_votes'];
+const BACKUP_TABLES = ['departments', 'categories', 'users', 'complaints', 'missions', 'mission_cases', 'updates', 'cycles', 'feedback', 'notifications', 'escalation_events', 'citizen_reminders', 'reopen_requests', 'privacy_requests', 'audit', 'case_messages', 'ward_boundaries', 'recovery_checks', 'operational_events', 'street_alerts', 'street_alert_votes'];
 const validWard = value => {
   const match = /^(DNCC|DSCC)-(\d{2})$/.exec(String(value || ''));
   return match && Number(match[2]) >= 1 && Number(match[2]) <= WARD_LIMITS[match[1]];
@@ -172,6 +172,21 @@ function createStore(adapter, options = {}) {
     user_id INTEGER NOT NULL REFERENCES users(id), choice TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(alert_id,user_id))`);
   run('CREATE INDEX IF NOT EXISTS street_alerts_public ON street_alerts(status,expires_at,ward_code)');
+  run(`CREATE TABLE IF NOT EXISTS missions (
+    id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, department_id INTEGER NOT NULL REFERENCES departments(id),
+    ward_code TEXT NOT NULL, latitude REAL NOT NULL, longitude REAL NOT NULL,
+    title TEXT NOT NULL, plan TEXT NOT NULL, next_action_at TEXT,
+    assignee_id INTEGER NOT NULL REFERENCES users(id), created_by INTEGER NOT NULL REFERENCES users(id),
+    status TEXT NOT NULL DEFAULT 'Planned', completion_note TEXT, completion_image TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT, cancelled_at TEXT)`);
+  run(`CREATE TABLE IF NOT EXISTS mission_cases (
+    id INTEGER PRIMARY KEY, mission_id INTEGER NOT NULL REFERENCES missions(id),
+    complaint_id INTEGER NOT NULL REFERENCES complaints(id), original_status TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(mission_id,complaint_id))`);
+  run('CREATE INDEX IF NOT EXISTS missions_department_status ON missions(department_id,status,id)');
+  run('CREATE INDEX IF NOT EXISTS mission_cases_case ON mission_cases(complaint_id,mission_id)');
+  run('CREATE INDEX IF NOT EXISTS mission_cases_mission ON mission_cases(mission_id,complaint_id)');
   run('CREATE TABLE IF NOT EXISTS backup_access (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL)');
   if (!all('PRAGMA table_info(users)').some(column => column.name === 'email_verified')) run('ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0');
   const userColumns = new Set(all('PRAGMA table_info(users)').map(column => column.name));
@@ -214,7 +229,25 @@ function createStore(adapter, options = {}) {
     if (!['Verified','Assigned','In Progress','Reopened'].includes(status)) run("UPDATE street_alerts SET status='Cleared',ended_at=CURRENT_TIMESTAMP WHERE complaint_id=? AND status='Active'", [complaint.id]);
     log(actor.id, complaint.id, action, complaint.status, status, note);
   };
-  const scrubCase = (complaintId, area) => {
+  const activeMissionForCase = complaintId => one(`SELECT m.id,m.code,m.status FROM mission_cases mc JOIN missions m ON m.id=mc.mission_id
+    WHERE mc.complaint_id=? AND m.status IN ('Planned','In Progress') ORDER BY m.id DESC LIMIT 1`, [complaintId]);
+  const scrubCase = (complaintId, area, actor) => {
+    const activeMissions = all(`SELECT m.id,m.status FROM mission_cases mc JOIN missions m ON m.id=mc.mission_id
+      WHERE mc.complaint_id=? AND m.status IN ('Planned','In Progress')`, [complaintId]);
+    for (const mission of activeMissions) {
+      if (mission.status === 'In Progress') {
+        const linked = all(`SELECT c.*,mc.original_status FROM mission_cases mc JOIN complaints c ON c.id=mc.complaint_id
+          WHERE mc.mission_id=? AND c.status='In Progress'`, [mission.id]);
+        for (const item of linked) changeStatus(item, actor, 'Repair mission cancelled', item.original_status, 'A linked case was removed. Review and plan this case separately.');
+      }
+      run("UPDATE missions SET status='Cancelled',cancelled_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?", [mission.id]);
+      run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [actor.id,'Cancelled repair mission after case removal','mission',mission.id,'A linked case was removed']);
+    }
+    run(`UPDATE missions SET title='Coordinated ward repair',plan='Work plan details removed after citizen data removal.',
+      completion_note=NULL,completion_image=NULL,latitude=round(latitude,2),longitude=round(longitude,2)
+      WHERE id IN (SELECT mission_id FROM mission_cases WHERE complaint_id=?)`, [complaintId]);
+    run('DELETE FROM mission_cases WHERE complaint_id=?', [complaintId]);
+    run('DELETE FROM missions WHERE id NOT IN (SELECT DISTINCT mission_id FROM mission_cases)');
     run('DELETE FROM street_alert_votes WHERE alert_id IN (SELECT id FROM street_alerts WHERE complaint_id=?)', [complaintId]);
     run('DELETE FROM street_alerts WHERE complaint_id=?', [complaintId]);
     run('UPDATE area_counts SET total=total-1 WHERE area_key=lower(trim(?))', [area]);
@@ -520,7 +553,8 @@ function createStore(adapter, options = {}) {
       const messages = privateAccess && !complaint.retained_at ? all(`SELECT m.id,m.complaint_id,m.sender_id,m.body,m.image,m.created_at,u.name AS sender,u.role AS sender_role
         FROM case_messages m JOIN users u ON u.id=m.sender_id WHERE m.complaint_id=? ORDER BY m.id DESC LIMIT 200`, [complaint.id]).reverse() : [];
       const includeImages = payload.includeImages !== false;
-      return { complaint: safeCase(user, includeImages ? complaint : { ...complaint, image: null, completion_image: null }), recurrence, updates,
+      const mission = one(`SELECT m.id,m.code,m.status FROM mission_cases mc JOIN missions m ON m.id=mc.mission_id WHERE mc.complaint_id=? ORDER BY m.id DESC LIMIT 1`, [complaint.id]);
+      return { complaint: safeCase(user, includeImages ? complaint : { ...complaint, image: null, completion_image: null }), recurrence, mission, updates,
         cycles: includeImages ? cycles : cycles.map(row => ({ ...row, completion_image: null })), feedback, escalationEvents, reopenRequests,
         messages: includeImages ? messages : messages.map(row => ({ ...row, image: null })), imagesDeferred: !includeImages };
     },
@@ -966,7 +1000,8 @@ function createStore(adapter, options = {}) {
       if (filter === 'blocked') where.push("c.blocked_reason IS NOT NULL AND c.blocked_reason<>''");
       if (filter === 'overdue') where.push('c.resolution_due_at<CURRENT_TIMESTAMP');
       const total = one(`SELECT COUNT(*) AS n FROM complaints c WHERE ${where.join(' AND ')}`, params).n;
-      const rows = all(`SELECT c.id,c.code,c.title,c.status,c.priority,c.ward_code,c.area,c.department_id,c.assignee_id,c.accepted_at,c.blocked_reason,c.next_action_at,c.resolution_due_at,c.created_at,d.name AS department,u.name AS assignee
+      const rows = all(`SELECT c.id,c.code,c.title,c.status,c.priority,c.ward_code,c.area,c.department_id,c.assignee_id,c.accepted_at,c.blocked_reason,c.next_action_at,c.resolution_due_at,c.created_at,d.name AS department,u.name AS assignee,
+        (SELECT m.id FROM mission_cases mc JOIN missions m ON m.id=mc.mission_id WHERE mc.complaint_id=c.id AND m.status IN ('Planned','In Progress') ORDER BY m.id DESC LIMIT 1) AS mission_id
         FROM complaints c JOIN departments d ON d.id=c.department_id LEFT JOIN users u ON u.id=c.assignee_id WHERE ${where.join(' AND ')}
         ORDER BY CASE WHEN c.blocked_reason IS NOT NULL AND c.blocked_reason<>'' THEN 1 WHEN c.assignee_id IS NULL THEN 0 ELSE 2 END,c.resolution_due_at ASC,c.id DESC LIMIT ? OFFSET ?`, [...params,limit,(page-1)*limit]);
       return { cases: rows, total, page, pageSize: limit, staff: user.role === 'staff' ? [] : all("SELECT id,name,department_id FROM users WHERE role='staff' AND active=1 ORDER BY name") };
@@ -974,6 +1009,7 @@ function createStore(adapter, options = {}) {
     assignWork(user, payload) {
       requireRole(user, ['staff','admin','superadmin']);
       const complaint = findComplaint(payload.id);
+      demand(!activeMissionForCase(complaint.id), 'This case is managed through a Repair Mission.');
       demand(complaint.department_id && !['Closed','Finished','Citizen Verified','Rejected','Duplicate'].includes(complaint.status), 'Choose an active assigned case.');
       let assigneeId;
       if (user.role === 'staff') {
@@ -993,6 +1029,7 @@ function createStore(adapter, options = {}) {
     setWorkPlan(user, payload) {
       requireRole(user, ['staff','admin','superadmin']);
       const complaint = findComplaint(payload.id);
+      demand(!activeMissionForCase(complaint.id), 'This case is managed through a Repair Mission.');
       demand(complaint.department_id && !['Closed','Finished','Citizen Verified','Rejected','Duplicate'].includes(complaint.status), 'Choose an active assigned case.');
       if (user.role === 'staff') demand(complaint.department_id === user.departmentId && complaint.assignee_id === user.id, 'Accept the case before changing its work plan.');
       const blockedReason = safeText(payload.blockedReason, 300);
@@ -1002,6 +1039,150 @@ function createStore(adapter, options = {}) {
       return transact(() => {
         run('UPDATE complaints SET blocked_reason=?,next_action_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?', [blockedReason || null,nextActionAt?.toISOString() || null,complaint.id]);
         log(user.id,complaint.id,'Updated work plan',complaint.status,complaint.status,blockedReason || (nextActionAt ? `Next action ${nextActionAt.toISOString()}` : 'Cleared work plan'));
+        return true;
+      });
+    },
+    missionCandidates(user, payload = {}) {
+      requireRole(user, ['staff','admin','superadmin']);
+      const query = safeText(payload.query, 50);
+      const anchorId = payload.anchorId == null ? null : Number(payload.anchorId);
+      let anchor = null;
+      if (anchorId !== null) {
+        demand(Number.isSafeInteger(anchorId) && anchorId > 0, 'Choose a valid starting case.');
+        anchor = findComplaint(anchorId);
+        demand(['Assigned','Reopened'].includes(anchor.status) && anchor.department_id && !anchor.retained_at && !activeMissionForCase(anchor.id), 'Choose an available assigned case.');
+        demand(user.role !== 'staff' || anchor.department_id === user.departmentId, 'You do not have permission for this department.');
+      }
+      const where = ["c.status IN ('Assigned','Reopened')", 'c.department_id IS NOT NULL', 'c.retained_at IS NULL', `NOT EXISTS (SELECT 1 FROM mission_cases mc JOIN missions m ON m.id=mc.mission_id WHERE mc.complaint_id=c.id AND m.status IN ('Planned','In Progress'))`];
+      const params = [];
+      if (user.role === 'staff') { where.push('c.department_id=?', '(c.assignee_id IS NULL OR c.assignee_id=?)'); params.push(user.departmentId || -1,user.id); }
+      if (anchor) { where.push('c.department_id=?','c.ward_code=?','c.latitude BETWEEN ? AND ?','c.longitude BETWEEN ? AND ?'); params.push(anchor.department_id,anchor.ward_code,anchor.latitude-.003,anchor.latitude+.003,anchor.longitude-.0035,anchor.longitude+.0035); }
+      else if (query) { where.push('(c.code LIKE ? OR c.title LIKE ?)'); params.push(`%${query}%`,`%${query}%`); }
+      const rows = all(`SELECT c.id,c.code,c.title,c.status,c.ward_code,c.department_id,c.assignee_id,c.latitude,c.longitude,d.name AS department
+        FROM complaints c JOIN departments d ON d.id=c.department_id WHERE ${where.join(' AND ')} ORDER BY c.id DESC LIMIT 100`, params);
+      return rows.map(row => ({ id: row.id, code: row.code, title: row.title, status: row.status, ward_code: row.ward_code, department_id: row.department_id, department: row.department, assignee_id: row.assignee_id,
+        distance: anchor ? Math.round(haversineMeters(anchor,row)) : null })).filter(row => !anchor || row.distance <= 250).slice(0, 50);
+    },
+    listMissions(user, payload = {}) {
+      requireRole(user, ['staff','admin','superadmin']);
+      const page = payload.page == null ? 1 : Number(payload.page);
+      demand(Number.isSafeInteger(page) && page >= 1 && page <= 100000, 'Choose a valid mission page.');
+      const scope = payload.scope === 'history' ? 'history' : 'active';
+      const where = [scope === 'history' ? "m.status IN ('Completed','Cancelled')" : "m.status IN ('Planned','In Progress')"];
+      const params = [];
+      if (user.role === 'staff') { where.push('m.department_id=?'); params.push(user.departmentId || -1); }
+      const total = one(`SELECT COUNT(*) AS n FROM missions m WHERE ${where.join(' AND ')}`, params).n;
+      const missions = all(`SELECT m.id,m.code,m.title,m.plan,m.status,m.department_id,m.ward_code,m.assignee_id,m.next_action_at,m.created_at,m.completed_at,m.cancelled_at,
+        d.name AS department,u.name AS assignee,COUNT(mc.id) AS case_count,
+        COALESCE(SUM(CASE WHEN c.status IN ('Citizen Verified','Finished') THEN 1 ELSE 0 END),0) AS confirmed_count,
+        COALESCE(SUM(CASE WHEN c.status='Awaiting Feedback' THEN 1 ELSE 0 END),0) AS awaiting_count
+        FROM missions m JOIN departments d ON d.id=m.department_id JOIN users u ON u.id=m.assignee_id
+        LEFT JOIN mission_cases mc ON mc.mission_id=m.id LEFT JOIN complaints c ON c.id=mc.complaint_id
+        WHERE ${where.join(' AND ')} GROUP BY m.id ORDER BY m.id DESC LIMIT 25 OFFSET ?`, [...params,(page-1)*25]);
+      return { missions, total, page, pageSize: 25,
+        staff: user.role === 'staff' ? [] : all("SELECT id,name,department_id FROM users WHERE role='staff' AND active=1 ORDER BY name") };
+    },
+    missionDetail(user, payload) {
+      requireRole(user, ['staff','admin','superadmin']);
+      const missionId = Number(payload.id);
+      demand(Number.isSafeInteger(missionId) && missionId > 0, 'Choose a valid mission.');
+      const mission = one(`SELECT m.*,d.name AS department,u.name AS assignee FROM missions m JOIN departments d ON d.id=m.department_id
+        JOIN users u ON u.id=m.assignee_id WHERE m.id=?`, [missionId]);
+      demand(mission && (user.role !== 'staff' || mission.department_id === user.departmentId), 'Mission not found.');
+      const cases = all(`SELECT c.id,c.code,c.title,c.status,c.ward_code,c.resolution_due_at,c.assignee_id,mc.original_status
+        FROM mission_cases mc JOIN complaints c ON c.id=mc.complaint_id WHERE mc.mission_id=? ORDER BY c.id`, [missionId]);
+      return { ...mission, cases };
+    },
+    createMission(user, payload) {
+      requireRole(user, ['staff','admin','superadmin']);
+      const ids = payload.caseIds;
+      demand(Array.isArray(ids) && ids.length >= 2 && ids.length <= 10 && ids.every(value => Number.isSafeInteger(value) && value > 0) && new Set(ids).size === ids.length, 'Choose 2 to 10 different cases.');
+      const title = safeText(payload.title, 100), plan = safeText(payload.plan, 1200);
+      demand(title.length >= 8 && plan.length >= 12, 'Give the mission a title and a useful work plan.');
+      const nextAction = payload.nextActionAt ? new Date(payload.nextActionAt) : null;
+      demand(!nextAction || Number.isFinite(nextAction.getTime()), 'Choose a valid next action time.');
+      const cases = ids.map(findComplaint), anchor = cases[0];
+      demand(anchor.department_id && validWard(anchor.ward_code), 'Assign a department and ward before grouping cases.');
+      demand(cases.every(item => ['Assigned','Reopened'].includes(item.status) && !item.retained_at && item.department_id === anchor.department_id && item.ward_code === anchor.ward_code && haversineMeters(anchor,item) <= 250 && !activeMissionForCase(item.id)), 'Cases must be active, ungrouped, in one department and ward, and within 250 metres.');
+      demand(user.role !== 'staff' || user.departmentId === anchor.department_id, 'You do not have permission for this department.');
+      const assigneeId = user.role === 'staff' ? user.id : Number(payload.assigneeId);
+      demand(Number.isSafeInteger(assigneeId) && one("SELECT id FROM users WHERE id=? AND role='staff' AND active=1 AND department_id=?", [assigneeId,anchor.department_id]), 'Choose active staff in this department.');
+      demand(cases.every(item => !item.assignee_id || item.assignee_id === assigneeId), 'Move cases assigned to another worker before grouping them.');
+      return transact(() => {
+        run('INSERT INTO missions (code,department_id,ward_code,latitude,longitude,title,plan,next_action_at,assignee_id,created_by) VALUES (?,?,?,?,?,?,?,?,?,?)', ['PENDING',anchor.department_id,anchor.ward_code,anchor.latitude,anchor.longitude,title,plan,nextAction?.toISOString() || null,assigneeId,user.id]);
+        const missionId = id(), code = `RM-${1000 + missionId}`;
+        run('UPDATE missions SET code=? WHERE id=?', [code,missionId]);
+        for (const item of cases) {
+          run('INSERT INTO mission_cases (mission_id,complaint_id,original_status) VALUES (?,?,?)', [missionId,item.id,item.status]);
+          run('UPDATE complaints SET assignee_id=?,accepted_at=COALESCE(accepted_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=?', [assigneeId,item.id]);
+          log(user.id,item.id,'Added to repair mission',item.status,item.status,code);
+        }
+        run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Created repair mission','mission',missionId,code]);
+        return missionId;
+      });
+    },
+    missionAction(user, payload) {
+      requireRole(user, ['staff','admin','superadmin']);
+      const missionId = Number(payload.id), action = safeText(payload.action, 20);
+      demand(Number.isSafeInteger(missionId) && missionId > 0 && ['plan','start','complete','cancel'].includes(action), 'Choose a valid mission action.');
+      const mission = one('SELECT * FROM missions WHERE id=?', [missionId]);
+      demand(mission && (user.role !== 'staff' || mission.department_id === user.departmentId), 'Mission not found.');
+      const isAssignedStaff = user.role === 'staff' && user.id === mission.assignee_id;
+      const isAdmin = ['admin','superadmin'].includes(user.role);
+      demand(isAssignedStaff || isAdmin, 'Only the assigned worker or an administrator can manage this mission.');
+      const cases = all(`SELECT c.*,mc.original_status FROM mission_cases mc JOIN complaints c ON c.id=mc.complaint_id WHERE mc.mission_id=? ORDER BY c.id`, [missionId]);
+      if (action === 'plan') {
+        demand(mission.status === 'Planned' || mission.status === 'In Progress', 'This mission can no longer be changed.');
+        const plan = safeText(payload.plan, 1200);
+        demand(plan.length >= 12, 'Write a useful work plan.');
+        const nextAction = payload.nextActionAt ? new Date(payload.nextActionAt) : null;
+        demand(!nextAction || Number.isFinite(nextAction.getTime()), 'Choose a valid next action time.');
+        return transact(() => {
+          run('UPDATE missions SET plan=?,next_action_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?', [plan,nextAction?.toISOString() || null,missionId]);
+          run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Updated repair mission plan','mission',missionId,mission.code]);
+          return true;
+        });
+      }
+      if (action === 'start') {
+        demand(isAssignedStaff, 'Only the assigned department worker can start a mission.');
+        demand(mission.status === 'Planned' && cases.length >= 2 && cases.every(item => ['Assigned','Reopened'].includes(item.status) && item.department_id === mission.department_id && !item.retained_at), 'All linked cases must still be ready to start.');
+        return transact(() => {
+          for (const item of cases) changeStatus(item,user,'Mission work started','In Progress',mission.code);
+          run("UPDATE missions SET status='In Progress',updated_at=CURRENT_TIMESTAMP WHERE id=?", [missionId]);
+          run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Started repair mission','mission',missionId,mission.code]);
+          return true;
+        });
+      }
+      if (action === 'complete') {
+        demand(isAssignedStaff, 'Only the assigned department worker can complete a mission.');
+        demand(mission.status === 'In Progress' && cases.length >= 2 && cases.every(item => item.status === 'In Progress' && item.department_id === mission.department_id && !item.retained_at), 'All linked cases must still be in progress.');
+        const note = safeText(payload.note, 1000), image = payload.image;
+        demand(note.length >= 5, 'Describe the completed repair.');
+        demand(typeof image === 'string' && /^data:image\/(png|jpeg|webp);base64,/.test(image) && image.length < 600000, 'Attach a completion photo before marking work complete.');
+        return transact(() => {
+          for (const item of cases) {
+            const cycle = (one('SELECT MAX(number) AS n FROM cycles WHERE complaint_id=?', [item.id]).n || 0) + 1;
+            run('INSERT INTO cycles (complaint_id,number,completion_image,completion_note) VALUES (?,?,?,?)', [item.id,cycle,image,note]);
+            run('UPDATE complaints SET completion_image=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?', [image,item.id]);
+            changeStatus(item,user,'Mission repair completed','Awaiting Feedback',`${mission.code}: ${note}`);
+            run('INSERT INTO notifications (user_id,complaint_id,title,message) VALUES (?,?,?,?)', [item.reporter_id,item.id,'Please review completed work',`${item.code}: Shared repair work was marked complete. Open your report to confirm your own outcome and give a rating.`]);
+          }
+          run("UPDATE missions SET status='Completed',completion_note=?,completion_image=?,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?", [note,image,missionId]);
+          run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Completed repair mission','mission',missionId,mission.code]);
+          return true;
+        });
+      }
+      demand(action === 'cancel' && (isAdmin || (isAssignedStaff && mission.status === 'Planned')), 'Only administrators can cancel a started mission.');
+      demand(['Planned','In Progress'].includes(mission.status), 'Only an active mission can be cancelled.');
+      const reason = safeText(payload.reason, 300);
+      demand(reason.length >= 5, 'Explain why the mission was cancelled.');
+      return transact(() => {
+        if (mission.status === 'In Progress') for (const item of cases) {
+          demand(item.status === 'In Progress', 'A linked case changed; review it before cancelling.');
+          changeStatus(item,user,'Repair mission cancelled',item.original_status,`${mission.code}: ${reason}`);
+        }
+        run("UPDATE missions SET status='Cancelled',cancelled_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?", [missionId]);
+        run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Cancelled repair mission','mission',missionId,mission.code]);
         return true;
       });
     },
@@ -1045,11 +1226,11 @@ function createStore(adapter, options = {}) {
       demand(saved && typeof payload.password === 'string' && payload.password.length <= 128 && verifyPassword(payload.password, saved.password_hash), 'Current password is incorrect.');
       return transact(() => {
         const count = one('SELECT COUNT(*) AS n FROM complaints').n;
-        for (const table of ['street_alert_votes','street_alerts','case_messages','notifications','feedback','updates','escalation_events','citizen_reminders','reopen_requests','cycles']) run(`DELETE FROM ${table}`);
+        for (const table of ['street_alert_votes','street_alerts','mission_cases','missions','case_messages','notifications','feedback','updates','escalation_events','citizen_reminders','reopen_requests','cycles']) run(`DELETE FROM ${table}`);
         run('UPDATE complaints SET duplicate_of=NULL, recurrence_of=NULL');
         run('DELETE FROM complaints');
         run('DELETE FROM area_counts');
-        run("DELETE FROM audit WHERE target_type='complaint' OR target_type='retention'");
+        run("DELETE FROM audit WHERE target_type IN ('complaint','retention','mission')");
         run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Purged complaints','system',0,`${count} complaints and related history removed`]);
         return { complaints: count };
       });
@@ -1092,6 +1273,7 @@ function createStore(adapter, options = {}) {
       else if (action === 'finish') requireRole(user, ['superadmin']);
       else requireRole(user, ['admin','superadmin']);
       const complaint = findComplaint(payload.id);
+      if (['assign','start','progress','resolve'].includes(action)) demand(!activeMissionForCase(complaint.id), 'This case is managed through a Repair Mission.');
       if (user.role === 'staff') demand(complaint.department_id === user.departmentId, 'This complaint belongs to another department.');
       return transact(() => {
         if (action === 'verify') {
@@ -1258,7 +1440,7 @@ function createStore(adapter, options = {}) {
         demand(item, 'Pending citizen request not found.');
         if (payload.decision === 'Approved') {
           const cases = all('SELECT id,area FROM complaints WHERE reporter_id=?', [item.user_id]);
-          for (const { id: complaintId, area } of cases) scrubCase(complaintId, area);
+          for (const { id: complaintId, area } of cases) scrubCase(complaintId, area, user);
           run("UPDATE audit SET detail='' WHERE actor_id=?", [item.user_id]);
           run("UPDATE privacy_requests SET reason='',decision_note='' WHERE user_id=?", [item.user_id]);
           run('DELETE FROM notifications WHERE user_id=?', [item.user_id]);
@@ -1286,7 +1468,7 @@ function createStore(adapter, options = {}) {
       demand(saved && typeof payload.password === 'string' && payload.password.length <= 128 && verifyPassword(payload.password, saved.password_hash), 'Current password is incorrect.');
       return transact(() => {
         const cases = all("SELECT id,area FROM complaints WHERE status IN ('Closed','Finished','Rejected','Duplicate') AND retained_at IS NULL AND created_at<=datetime('now','-' || ? || ' days') ORDER BY id LIMIT 50", [days]);
-        for (const row of cases) scrubCase(row.id, row.area);
+        for (const row of cases) scrubCase(row.id, row.area, user);
         const remaining = one("SELECT COUNT(*) AS total FROM complaints WHERE status IN ('Closed','Finished','Rejected','Duplicate') AND retained_at IS NULL AND created_at<=datetime('now','-' || ? || ' days')", [days]).total;
         run('INSERT INTO audit (actor_id,action,target_type,target_id,detail) VALUES (?,?,?,?,?)', [user.id,'Anonymized old cases','retention',0,`${days} days; ${cases.length} cases; ${remaining} remaining`]);
         return { processed: cases.length, remaining };

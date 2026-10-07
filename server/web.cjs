@@ -75,7 +75,7 @@ async function createWebServer(options = {}) {
   const server = http.createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://tile.openstreetmap.org; connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tile.openstreetmap.org; connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
     try {
       const url = new URL(req.url || '/', 'http://127.0.0.1');
       if (req.method === 'POST' && url.pathname === '/api/request') {
@@ -178,6 +178,11 @@ async function createWebServer(options = {}) {
           case 'wardSuggestion': result = database.wardSuggestion(actor, payload); break;
           case 'importWardBoundaries': result = database.importWardBoundaries(actor, payload); break;
           case 'workQueue': result = database.workQueue(actor, payload); break;
+          case 'missionCandidates': result = database.missionCandidates(actor, payload); break;
+          case 'listMissions': result = database.listMissions(actor, payload); break;
+          case 'missionDetail': result = database.missionDetail(actor, payload); break;
+          case 'createMission': result = database.createMission(actor, payload); break;
+          case 'missionAction': result = database.missionAction(actor, payload); break;
           case 'assignWork': result = database.assignWork(actor, payload); break;
           case 'setWorkPlan': result = database.setWorkPlan(actor, payload); break;
           case 'operationsHealth': result = database.operationsHealth(actor); break;
