@@ -18,11 +18,19 @@ const sample = (category, id, name, longitude) => ({
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   let browser;
   try {
-    database.bootstrapAdmin({ name: 'Owner', email: 'places-owner@example.test', password: 'owner-password-123' });
+    const owner = database.bootstrapAdmin({ name: 'Owner', email: 'places-owner@example.test', password: 'owner-password-123' });
     database.register({ name: 'Resident', email: 'places-citizen@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
+    database.manage(owner, { type: 'user', name: 'Area Admin', email: 'places-admin@example.test', password: 'admin-password-123', role: 'admin' });
+    database.manage(owner, { type: 'user', name: 'Fire Worker', email: 'places-staff@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 });
     browser = await chromium.launch({ executablePath: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', headless: true });
     const page = await browser.newPage({ viewport: { width: 390, height: 840 } });
     await page.goto(`http://127.0.0.1:${server.address().port}`);
+    await page.getByRole('button', { name: 'New citizen? Create an account' }).click();
+    for (const label of ['North area guide', 'South area guide', 'North 2018 map']) assert.equal(await page.getByRole('link', { name: label }).count(), 0);
+    await page.getByLabel('Choose city corporation').selectOption('DNCC');
+    assert.equal(await page.getByRole('link', { name: /North ward directory/ }).count(), 1);
+    assert.equal(await page.getByRole('link', { name: /South ward directory/ }).count(), 0);
+    await page.getByRole('button', { name: 'Back to sign in' }).click();
     await page.getByLabel('Email address').fill('places-citizen@example.test');
     await page.getByLabel('Password').fill('citizen-password-123');
     await page.getByRole('button', { name: 'Sign in' }).click();
@@ -41,7 +49,26 @@ const sample = (category, id, name, longitude) => ({
     await page.getByLabel('Place category').selectOption('fire');
     await page.locator('.places-list').getByRole('button', { name: /Dhanmondi Fire Station/ }).waitFor();
     assert.equal(await page.getByRole('link', { name: /Fire service 102/ }).getAttribute('href'), 'tel:102');
+    for (const category of ['hospital', 'school', 'college', 'university']) {
+      await page.getByLabel('Place category').selectOption(category);
+      await page.locator('.places-list').getByRole('button', { name: 'Nearby place' }).waitFor();
+    }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 2), true);
-    console.log('Nearby places smoke passed: citizen location, category change, details, hotline, routes, and mobile width.');
+    for (const [email, password] of [['places-owner@example.test', 'owner-password-123'], ['places-admin@example.test', 'admin-password-123'], ['places-staff@example.test', 'staff-password-123']]) {
+      const rolePage = await browser.newPage({ viewport: { width: 390, height: 840 } });
+      await rolePage.goto(`http://127.0.0.1:${server.address().port}`);
+      await rolePage.getByLabel('Email address').fill(email);
+      await rolePage.getByLabel('Password').fill(password);
+      await rolePage.getByRole('button', { name: 'Sign in' }).click();
+      await rolePage.locator('.sidebar nav').getByRole('button', { name: 'Issue map' }).click();
+      await rolePage.getByRole('button', { name: 'Nearby places' }).click();
+      await rolePage.getByLabel('Latitude').fill('23.7469');
+      await rolePage.getByLabel('Longitude').fill('90.3754');
+      await rolePage.getByRole('button', { name: 'Search from this point' }).click();
+      await rolePage.locator('.places-list').getByRole('button', { name: /Dhanmondi Model Thana/ }).waitFor();
+      assert.equal(await rolePage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 2), true);
+      await rolePage.close();
+    }
+    console.log('Nearby places smoke passed: clean sign-up, all four roles, nine categories, details, hotlines, routes, and mobile width.');
   } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); database.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

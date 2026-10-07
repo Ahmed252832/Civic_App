@@ -4,9 +4,13 @@ const SEARCHES = {
   fire: { radius: 8000, queries: [{ include: 'osm.amenity.fire_station' }] },
   mosque: { radius: 3500, queries: [{ include: 'osm.building.mosque' }, { include: 'osm.amenity.place_of_worship', q: 'mosque' }, { include: 'osm.amenity.place_of_worship', q: 'masjid' }] },
   temple: { radius: 6000, queries: [{ include: 'osm.amenity.place_of_worship', q: 'temple' }, { include: 'osm.amenity.place_of_worship', q: 'mandir' }, { include: 'osm.amenity.place_of_worship', q: 'মন্দির' }] },
-  market: { radius: 3500, queries: [{ include: 'osm.amenity.marketplace' }, { include: 'osm.shop.supermarket' }] }
+  market: { radius: 3500, queries: [{ include: 'osm.amenity.marketplace' }, { include: 'osm.shop.supermarket' }] },
+  hospital: { radius: 6000, queries: [{ include: 'osm.amenity.hospital' }] },
+  school: { radius: 3500, queries: [{ include: 'osm.amenity.school' }] },
+  college: { radius: 5000, queries: [{ include: 'osm.amenity.college' }] },
+  university: { radius: 7000, queries: [{ include: 'osm.amenity.university' }] }
 };
-const LABELS = { police: 'Police station', fire: 'Fire station', mosque: 'Mosque', temple: 'Temple', market: 'Market' };
+const LABELS = { police: 'Police station', fire: 'Fire station', mosque: 'Mosque', temple: 'Temple', market: 'Market', hospital: 'Hospital', school: 'School', college: 'College', university: 'University' };
 const haversine = (a, b) => {
   const rad = n => n * Math.PI / 180;
   const dLat = rad(b.latitude - a.latitude), dLon = rad(b.longitude - a.longitude);
@@ -27,6 +31,10 @@ const matchesCategory = (category, properties) => {
   if (category === 'police') return key === 'amenity:police';
   if (category === 'fire') return key === 'amenity:fire_station';
   if (category === 'market') return key === 'amenity:marketplace' || key === 'shop:supermarket';
+  if (category === 'hospital') return key === 'amenity:hospital';
+  if (category === 'school') return key === 'amenity:school';
+  if (category === 'college') return key === 'amenity:college';
+  if (category === 'university') return key === 'amenity:university';
   if (category === 'mosque') return key === 'building:mosque' || (key === 'amenity:place_of_worship' && /mosque|masjid|মসজিদ|জামে|jame/i.test(properties.name || ''));
   if (category === 'temple') return key === 'amenity:place_of_worship' && /temple|mandir|মন্দির|দেবালয়|দেবালয়|vihara|বিহার/i.test(properties.name || '');
   return false;
@@ -57,7 +65,7 @@ function createNearbyPlacesService(fetcher = fetch) {
     const searches = SEARCHES[category].queries.map(async query => {
       const url = new URL('https://photon.komoot.io/api/');
       url.search = new URLSearchParams({ ...query, lat: String(gridLatitude), lon: String(gridLongitude), zoom: '15', location_bias_scale: '0', bbox: '90.30,23.65,90.54,23.94', limit: '50', lang: 'en' }).toString();
-      const response = await fetcher(url.href, { headers: { 'User-Agent': 'CivicPulse/0.15 (https://github.com/Ahmed252832/Civic_App)' }, signal: AbortSignal.timeout(10000) });
+      const response = await fetcher(url.href, { headers: { 'User-Agent': 'CivicPulse/0.16 (https://github.com/Ahmed252832/Civic_App)' }, signal: AbortSignal.timeout(10000) });
       if (!response.ok) throw new Error('Nearby place source is temporarily unavailable.');
       const body = await response.text();
       if (body.length > 1_000_000) throw new Error('Nearby place response was too large.');

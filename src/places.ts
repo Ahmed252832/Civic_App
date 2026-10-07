@@ -7,7 +7,11 @@ export const placeLabel = (category: PlaceCategory, language: string) => {
     fire: ['Fire stations', 'ফায়ার স্টেশন'],
     mosque: ['Mosques', 'মসজিদ'],
     temple: ['Temples', 'মন্দির'],
-    market: ['Markets', 'বাজার']
+    market: ['Markets', 'বাজার'],
+    hospital: ['Hospitals', 'হাসপাতাল'],
+    school: ['Schools', 'বিদ্যালয়'],
+    college: ['Colleges', 'কলেজ'],
+    university: ['Universities', 'বিশ্ববিদ্যালয়']
   };
   return names[category][language === 'bn' ? 1 : 0];
 };

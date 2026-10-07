@@ -88,12 +88,12 @@ function PlaceMarker({ place, origin, selected, onSelect, routeMode }: { place: 
   const bn = language === 'bn';
   const dial = place.phone?.replace(/[^+0-9]/g, '');
   return <CircleMarker center={[place.latitude, place.longitude]} radius={selected ? 12 : 9} bubblingMouseEvents={false}
-    pathOptions={{ color: selected ? '#fff2bb' : '#10243a', weight: selected ? 3 : 2, fillColor: place.category === 'police' ? '#75baff' : place.category === 'fire' ? '#ff9b77' : place.category === 'mosque' ? '#8ae0af' : place.category === 'temple' ? '#c9a2ff' : '#ffd477', fillOpacity: 1 }}
+    pathOptions={{ color: selected ? '#fff2bb' : '#10243a', weight: selected ? 3 : 2, fillColor: ({ police: '#75baff', fire: '#ff9b77', hospital: '#ff7893', mosque: '#8ae0af', temple: '#c9a2ff', market: '#ffd477', school: '#83d2f8', college: '#8db9ff', university: '#a59df5' } as Record<string, string>)[place.category], fillOpacity: 1 }}
     eventHandlers={{ click: () => { onSelect(place.id); map.flyTo([place.latitude, place.longitude], Math.max(map.getZoom(), 16), { duration: .6 }); } }}>
     <Tooltip>{place.name}</Tooltip>
     <Popup><div className="place-popup"><strong>{place.name}</strong><span>{place.address || (bn ? 'ঠিকানা দেওয়া নেই' : 'Address not listed')}</span><small>{placeDistance(place.distanceMeters, language)} {bn ? 'সরলরেখায়' : 'straight-line distance'}</small>
       {place.phone && dial && <a href={`tel:${dial}`}>{bn ? 'তালিকাভুক্ত ফোন' : 'Listed phone'}: {place.phone}</a>}
-      {place.category === 'police' && <a href="tel:999">{bn ? 'জরুরি সেবা ৯৯৯' : 'Emergency hotline 999'}</a>}
+      {(place.category === 'police' || place.category === 'hospital') && <a href="tel:999">{bn ? 'জরুরি সেবা ৯৯৯' : 'Emergency hotline 999'}</a>}
       {place.category === 'fire' && <a href="tel:102">{bn ? 'ফায়ার সার্ভিস ১০২' : 'Fire service 102'}</a>}
       <a href={directionsUrl(origin, place, routeMode)} target="_blank" rel="noreferrer">{bn ? 'পথনির্দেশ খুলুন ↗' : 'Open route ↗'}</a>
     </div></Popup>

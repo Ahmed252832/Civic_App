@@ -296,7 +296,6 @@ export class CivicState {
       let data;
       switch (method) {
         case 'nearbyPlaces':
-          if (user.role !== 'citizen') throw new Error('Only citizens can search nearby places.');
           this.rateLimit(request, 'nearby-places', 90);
           data = await nearbyPlaces(payload);
           break;

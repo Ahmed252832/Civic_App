@@ -159,7 +159,6 @@ async function createWebServer(options = {}) {
         let result;
         switch (method) {
           case 'nearbyPlaces':
-            if (actor.role !== 'citizen') throw new Error('Only citizens can search nearby places.');
             result = await (options.nearbyPlaces || nearbyPlaces)(payload);
             break;
           case 'snapshot': result = database.snapshot(actor); break;

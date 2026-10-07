@@ -4,7 +4,7 @@ import { directionsUrl, placeDistance, placeLabel } from './places';
 import type { NearbyPlacesResult, PlaceCategory } from './types';
 import { useLocale } from './i18n';
 
-const categories: PlaceCategory[] = ['police', 'fire', 'mosque', 'temple', 'market'];
+const categories: PlaceCategory[] = ['police', 'fire', 'hospital', 'mosque', 'temple', 'market', 'school', 'college', 'university'];
 
 export default function NearbyPlacesPanel({ category, onCategory, origin, onLocate, locating, result, loading, error, onRetry, selectedId, onSelect, routeMode, onRouteMode }: {
   category: PlaceCategory; onCategory: (value: PlaceCategory) => void; origin: MapPoint | null; onLocate: () => void; locating: boolean;
@@ -20,7 +20,7 @@ export default function NearbyPlacesPanel({ category, onCategory, origin, onLoca
     <label>{bn ? 'যে স্থান খুঁজবেন' : 'Place category'}<select value={category} onChange={event => onCategory(event.target.value as PlaceCategory)}>{categories.map(value => <option key={value} value={value}>{placeLabel(value, language)}</option>)}</select></label>
     <div className="places-origin"><MapPin size={18} /><div><strong>{origin ? (bn ? 'শুরুর স্থান বাছা হয়েছে' : 'Starting point selected') : (bn ? 'শুরুর স্থান বাছুন' : 'Choose a starting point')}</strong><small>{origin ? `${origin.latitude.toFixed(5)}, ${origin.longitude.toFixed(5)}` : (bn ? 'অবস্থান ব্যবহার করুন বা মানচিত্রে ক্লিক করুন' : 'Use your location or click the map')}</small></div></div>
     <button type="button" className="secondary places-location-button" disabled={locating} onClick={onLocate}><LocateFixed size={16} />{locating ? (bn ? 'অবস্থান খোঁজা হচ্ছে…' : 'Finding location…') : (bn ? 'আমার অবস্থান ব্যবহার করুন' : 'Use my location')}</button>
-    {(category === 'police' || category === 'fire') && <div className="places-hotline"><strong>{bn ? 'জরুরি হটলাইন' : 'Emergency hotline'}</strong><p>{bn ? 'জরুরি পরিস্থিতিতে কাছের স্থানে যাওয়ার অপেক্ষা করবেন না।' : 'For an emergency, call directly.'}</p><div>{category === 'fire' && <a href="tel:102"><Flame size={16} /> {bn ? 'ফায়ার সার্ভিস ১০২' : 'Fire service 102'}</a>}<a href="tel:999"><ShieldCheck size={16} /> {bn ? 'জরুরি সেবা ৯৯৯' : 'Emergency 999'}</a></div></div>}
+    {(category === 'police' || category === 'fire' || category === 'hospital') && <div className="places-hotline"><strong>{bn ? 'জরুরি হটলাইন' : 'Emergency hotline'}</strong><p>{bn ? 'জরুরি পরিস্থিতিতে কাছের স্থানে যাওয়ার অপেক্ষা করবেন না।' : 'For an emergency, call directly.'}</p><div>{category === 'fire' && <a href="tel:102"><Flame size={16} /> {bn ? 'ফায়ার সার্ভিস ১০২' : 'Fire service 102'}</a>}<a href="tel:999"><ShieldCheck size={16} /> {bn ? 'জরুরি সেবা ৯৯৯' : 'Emergency 999'}</a></div></div>}
     {origin && <div className="places-results-head"><strong>{loading ? (bn ? 'কাছের স্থান খোঁজা হচ্ছে…' : 'Finding nearby places…') : `${result?.places.length || 0} ${bn ? 'টি স্থান' : 'places nearby'}`}</strong><button type="button" className="icon-button" aria-label={bn ? 'আবার খুঁজুন' : 'Search again'} disabled={loading} onClick={onRetry}><RefreshCw size={17} /></button></div>}
     {error && <p className="places-error" role="alert">{error}</p>}
     {result?.partial && <p className="places-caution">{bn ? 'কিছু মানচিত্রের তথ্য এখন পাওয়া যায়নি; আরও স্থান থাকতে পারে।' : 'Some map results are unavailable right now; more places may exist.'}</p>}

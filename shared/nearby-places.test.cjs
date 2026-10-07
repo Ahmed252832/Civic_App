@@ -42,3 +42,13 @@ test('nearby search returns partial results when one of several source queries f
   assert.equal(result.partial, true);
   assert.equal(result.places[0].name, 'Local market');
 });
+
+test('hospitals and education categories return only the selected place type', async () => {
+  const categories = ['hospital', 'school', 'college', 'university'];
+  const fetcher = async () => ({ ok: true, text: async () => JSON.stringify({ features: categories.map((category, index) => feature(20 + index, 'amenity', category, 90.375 + index * .001, 23.747, category)) }) });
+  const search = createNearbyPlacesService(fetcher);
+  for (const category of categories) {
+    const result = await search({ latitude: 23.747, longitude: 90.375, category });
+    assert.deepEqual(result.places.map(place => place.category), [category]);
+  }
+});

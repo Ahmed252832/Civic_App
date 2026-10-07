@@ -28,7 +28,7 @@ test('web API protects reports and revokes disabled staff sessions', async () =>
     const citizen = await call('register', { name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     const neighbor = await call('register', { name: 'Second Citizen', email: 'second@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     assert.equal((await call('nearbyPlaces', { latitude: 23.747, longitude: 90.375, category: 'police' })).response.status, 401);
-    assert.equal((await call('nearbyPlaces', { latitude: 23.747, longitude: 90.375, category: 'police' }, owner.cookie)).body.ok, false);
+    assert.equal((await call('nearbyPlaces', { latitude: 23.747, longitude: 90.375, category: 'police' }, owner.cookie)).body.data.category, 'police');
     assert.equal((await call('nearbyPlaces', { latitude: 23.747, longitude: 90.375, category: 'police' }, citizen.cookie)).body.data.category, 'police');
     assert.equal((await call('snapshot', {}, citizen.cookie, 'http://evil.invalid')).response.status, 403);
     assert.equal((await call('snapshot')).response.status, 401);
@@ -45,6 +45,7 @@ test('web API protects reports and revokes disabled staff sessions', async () =>
     await call('manage', { type: 'user', name: 'Road Worker', email: 'staff@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 }, owner.cookie);
     const admin = await call('login', { email: 'admin@example.test', password: 'admin-password-123' });
     const staff = await call('login', { email: 'staff@example.test', password: 'staff-password-123' });
+    for (const cookie of [admin.cookie, staff.cookie]) assert.equal((await call('nearbyPlaces', { latitude: 23.747, longitude: 90.375, category: 'hospital' }, cookie)).body.data.category, 'hospital');
     for (const cookie of [owner.cookie, admin.cookie, staff.cookie, citizen.cookie, neighbor.cookie]) {
       const area = await call('areaSummary', { query: 'DNCC Ward 15' }, cookie);
       assert.equal(area.body.data.total, 1);
