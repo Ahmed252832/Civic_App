@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { createDatabase } = require('../electron/database.cjs');
 const { nearbyPlaces } = require('../shared/nearby-places.cjs');
+const { routeWatch } = require('../shared/route-watch.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 const distRoot = path.join(projectRoot, 'dist');
@@ -160,6 +161,9 @@ async function createWebServer(options = {}) {
         switch (method) {
           case 'nearbyPlaces':
             result = await (options.nearbyPlaces || nearbyPlaces)(payload);
+            break;
+          case 'routeWatch':
+            result = await (options.routeWatch || routeWatch)(database, payload);
             break;
           case 'snapshot': result = database.snapshot(actor); break;
           case 'performance': result = database.performance(actor); break;

@@ -1,9 +1,11 @@
 import storeModule from '../shared/store.cjs';
 import nearbyModule from '../shared/nearby-places.cjs';
+import routeModule from '../shared/route-watch.cjs';
 import { sendPushNotification } from '@mmmike/web-push/send';
 
 const { createStore } = storeModule;
 const { nearbyPlaces } = nearbyModule;
+const { routeWatch } = routeModule;
 const SESSION_SECONDS = 8 * 60 * 60;
 const safeHeaders = {
   'X-Content-Type-Options': 'nosniff',
@@ -298,6 +300,10 @@ export class CivicState {
         case 'nearbyPlaces':
           this.rateLimit(request, 'nearby-places', 90);
           data = await nearbyPlaces(payload);
+          break;
+        case 'routeWatch':
+          this.rateLimit(request, 'route-watch', 24);
+          data = await routeWatch(this.store, payload);
           break;
         case 'snapshot': data = this.store.snapshot(user); break;
         case 'performance': data = this.store.performance(user); break;

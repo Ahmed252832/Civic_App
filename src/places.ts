@@ -9,6 +9,7 @@ export const placeLabel = (category: PlaceCategory, language: string) => {
     temple: ['Temples', 'মন্দির'],
     market: ['Markets', 'বাজার'],
     hospital: ['Hospitals', 'হাসপাতাল'],
+    pharmacy: ['Pharmacies', 'ফার্মেসি'],
     school: ['Schools', 'বিদ্যালয়'],
     college: ['Colleges', 'কলেজ'],
     university: ['Universities', 'বিশ্ববিদ্যালয়']
@@ -17,13 +18,14 @@ export const placeLabel = (category: PlaceCategory, language: string) => {
 };
 export const placeDistance = (metres: number, language: string) =>
   metres < 1000 ? `${metres} ${language === 'bn' ? 'মিটার' : 'm'}` : `${(metres / 1000).toFixed(1)} ${language === 'bn' ? 'কিমি' : 'km'}`;
-export const directionsUrl = (origin: MapPoint, place: NearbyPlace, mode: 'walking' | 'driving') => {
+export const pointDirectionsUrl = (origin: MapPoint, destination: MapPoint, mode: 'walking' | 'driving') => {
   const url = new URL('https://www.google.com/maps/dir/');
   url.search = new URLSearchParams({
     api: '1',
     origin: `${origin.latitude},${origin.longitude}`,
-    destination: `${place.latitude},${place.longitude}`,
+    destination: `${destination.latitude},${destination.longitude}`,
     travelmode: mode
   }).toString();
   return url.href;
 };
+export const directionsUrl = (origin: MapPoint, place: NearbyPlace, mode: 'walking' | 'driving') => pointDirectionsUrl(origin, place, mode);

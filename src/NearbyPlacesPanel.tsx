@@ -1,15 +1,15 @@
-import { ArrowRight, Clock3, Flame, LocateFixed, MapPin, Navigation, Phone, RefreshCw, ShieldCheck } from 'lucide-react';
+import { ArrowRight, Clock3, Flame, LocateFixed, MapPin, Navigation, Phone, RefreshCw, Route, ShieldCheck } from 'lucide-react';
 import type { MapPoint } from './MapViews';
 import { directionsUrl, placeDistance, placeLabel } from './places';
-import type { NearbyPlacesResult, PlaceCategory } from './types';
+import type { NearbyPlace, NearbyPlacesResult, PlaceCategory } from './types';
 import { useLocale } from './i18n';
 
-const categories: PlaceCategory[] = ['police', 'fire', 'hospital', 'mosque', 'temple', 'market', 'school', 'college', 'university'];
+const categories: PlaceCategory[] = ['police', 'fire', 'hospital', 'pharmacy', 'mosque', 'temple', 'market', 'school', 'college', 'university'];
 
-export default function NearbyPlacesPanel({ category, onCategory, origin, onLocate, locating, result, loading, error, onRetry, selectedId, onSelect, routeMode, onRouteMode }: {
+export default function NearbyPlacesPanel({ category, onCategory, origin, onLocate, locating, result, loading, error, onRetry, selectedId, onSelect, routeMode, onRouteMode, onWatchRoute }: {
   category: PlaceCategory; onCategory: (value: PlaceCategory) => void; origin: MapPoint | null; onLocate: () => void; locating: boolean;
   result: NearbyPlacesResult | null; loading: boolean; error: string; onRetry: () => void;
-  selectedId: string | null; onSelect: (id: string) => void; routeMode: 'walking' | 'driving'; onRouteMode: (mode: 'walking' | 'driving') => void;
+  selectedId: string | null; onSelect: (id: string) => void; routeMode: 'walking' | 'driving'; onRouteMode: (mode: 'walking' | 'driving') => void; onWatchRoute: (origin: MapPoint, destination: NearbyPlace) => void;
 }) {
   const { language } = useLocale();
   const bn = language === 'bn';
@@ -31,6 +31,7 @@ export default function NearbyPlacesPanel({ category, onCategory, origin, onLoca
       {selected.openingHours && <p><Clock3 size={16} /> {bn ? 'তালিকাভুক্ত সময়' : 'Listed hours'}: {selected.openingHours}</p>}
       <label>{bn ? 'যাতায়াতের ধরন' : 'Travel mode'}<select value={routeMode} onChange={event => onRouteMode(event.target.value as 'walking' | 'driving')}><option value="walking">{bn ? 'হেঁটে' : 'Walking'}</option><option value="driving">{bn ? 'গাড়িতে' : 'Driving'}</option></select></label>
       <a className="primary place-route" href={directionsUrl(origin, selected, routeMode)} target="_blank" rel="noreferrer"><Navigation size={16} /> {bn ? 'গুগল ম্যাপে পথ দেখুন' : 'Open route in Google Maps'} <ArrowRight size={15} /></a>
+      <button type="button" className="secondary place-watch-route" onClick={() => onWatchRoute(origin, selected)}><Route size={16} />{bn ? 'এই পথের সতর্কতা দেখুন' : 'Check alerts on this route'}</button>
       {selected.website && <a href={selected.website} target="_blank" rel="noreferrer">{bn ? 'তালিকাভুক্ত ওয়েবসাইট ↗' : 'Listed website ↗'}</a>}
       <a href={selected.osmUrl} target="_blank" rel="noreferrer">{bn ? 'OpenStreetMap-এ স্থানটি দেখুন ↗' : 'View place on OpenStreetMap ↗'}</a>
     </article>}

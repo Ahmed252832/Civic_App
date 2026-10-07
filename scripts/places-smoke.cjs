@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { chromium } = require('playwright-core');
 const { createWebServer } = require('../server/web.cjs');
 
@@ -13,8 +15,9 @@ const sample = (category, id, name, longitude) => ({
   const { server, database } = await createWebServer({ databasePath: ':memory:', setupKey: 'test-only-key', nearbyPlaces: async ({ category }) => ({
     category, radiusMeters: 6000, partial: false, source: 'test', places: category === 'police'
       ? [sample('police', 1, 'Dhanmondi Model Thana', 90.377), sample('police', 2, 'Second police station', 90.378)]
-      : [sample(category, 3, category === 'fire' ? 'Dhanmondi Fire Station' : 'Nearby place', 90.377)]
-  }) });
+      : [sample(category, 3, category === 'fire' ? 'Dhanmondi Fire Station' : category === 'hospital' ? 'Dhanmondi Hospital' : category === 'pharmacy' ? 'Dhanmondi Pharmacy' : 'Nearby place', 90.377)]
+  }), routeWatch: async (_store, payload) => ({ origin: payload.origin, destination: payload.destination, path: [payload.origin, { latitude: 23.7469, longitude: 90.385 }, payload.destination], distanceMeters: 4200, durationSeconds: 600,
+    alerts: [{ id: 44, hazard_type: 'Flooding', ward_code: 'DNCC-15', latitude: 23.7469, longitude: 90.385, created_at: '2026-10-08 08:00:00', expires_at: '2026-10-10 08:00:00', still_count: 1, clear_count: 0, radius_metres: 250, distance_from_route_metres: 100 }], corridorMeters: 500, source: 'test', checkedAt: new Date().toISOString() }) });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   let browser;
   try {
@@ -49,11 +52,34 @@ const sample = (category, id, name, longitude) => ({
     await page.getByLabel('Place category').selectOption('fire');
     await page.locator('.places-list').getByRole('button', { name: /Dhanmondi Fire Station/ }).waitFor();
     assert.equal(await page.getByRole('link', { name: /Fire service 102/ }).getAttribute('href'), 'tel:102');
-    for (const category of ['hospital', 'school', 'college', 'university']) {
+    for (const category of ['school', 'college', 'university']) {
       await page.getByLabel('Place category').selectOption(category);
       await page.locator('.places-list').getByRole('button', { name: 'Nearby place' }).waitFor();
     }
+    await page.getByRole('button', { name: 'Pharmacy finder' }).click();
+    await page.locator('.places-list').getByRole('button', { name: /Dhanmondi Pharmacy/ }).waitFor();
+    await page.locator('.place-watch-route').click();
+    assert.equal(await page.getByLabel('Start latitude').inputValue(), '23.7469');
+    assert.equal(await page.getByLabel('Destination longitude').inputValue(), '90.377');
+    await page.getByRole('button', { name: 'Help Now' }).click();
+    await page.locator('.help-group').getByRole('button', { name: /Dhanmondi Model Thana/ }).waitFor();
+    await page.locator('.help-group').getByRole('button', { name: /Dhanmondi Fire Station/ }).waitFor();
+    await page.locator('.help-group').getByRole('button', { name: /Dhanmondi Hospital/ }).waitFor();
+    assert.equal(await page.locator('.help-hotlines a[href="tel:999"]').count(), 1);
+    await page.locator('.help-watch-route').click();
+    assert.equal(await page.getByLabel('Destination longitude').inputValue(), '90.377');
+    await page.getByRole('button', { name: 'Route Watch' }).click();
+    await page.getByLabel('Start latitude').fill('23.7469');
+    await page.getByLabel('Start longitude').fill('90.3754');
+    await page.getByLabel('Destination latitude').fill('23.7469');
+    await page.getByLabel('Destination longitude').fill('90.4054');
+    await page.getByRole('button', { name: 'Check route' }).click();
+    await page.getByRole('heading', { name: '1 alerts near this route' }).waitFor();
+    assert.match(await page.locator('.route-alert').innerText(), /Flooding/);
+    assert.equal(await page.locator('.route-watch-map .leaflet-overlay-pane path').count() > 0, true);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 2), true);
+    fs.mkdirSync(path.join(__dirname, '..', 'artifacts'), { recursive: true });
+    await page.screenshot({ path: path.join(__dirname, '..', 'artifacts', 'route-watch-mobile.png'), fullPage: true });
     for (const [email, password] of [['places-owner@example.test', 'owner-password-123'], ['places-admin@example.test', 'admin-password-123'], ['places-staff@example.test', 'staff-password-123']]) {
       const rolePage = await browser.newPage({ viewport: { width: 390, height: 840 } });
       await rolePage.goto(`http://127.0.0.1:${server.address().port}`);
@@ -69,6 +95,6 @@ const sample = (category, id, name, longitude) => ({
       assert.equal(await rolePage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 2), true);
       await rolePage.close();
     }
-    console.log('Nearby places smoke passed: clean sign-up, all four roles, nine categories, details, hotlines, routes, and mobile width.');
+    console.log('Local tools smoke passed: sign-up, all four roles, ten categories, pharmacy, Help Now, Route Watch, hotlines, routes, and mobile width.');
   } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); database.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

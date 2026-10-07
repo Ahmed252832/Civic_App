@@ -3,6 +3,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { createDatabase } = require('./database.cjs');
 const { nearbyPlaces } = require('../shared/nearby-places.cjs');
+const { routeWatch } = require('../shared/route-watch.cjs');
 
 let window;
 let database;
@@ -94,6 +95,9 @@ app.whenReady().then(async () => {
       switch (method) {
         case 'nearbyPlaces':
           result = await nearbyPlaces(payload);
+          break;
+        case 'routeWatch':
+          result = await routeWatch(database, payload);
           break;
         case 'snapshot': result = database.snapshot(actor); break;
         case 'performance': result = database.performance(actor); break;

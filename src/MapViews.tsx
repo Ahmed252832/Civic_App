@@ -88,7 +88,7 @@ function PlaceMarker({ place, origin, selected, onSelect, routeMode }: { place: 
   const bn = language === 'bn';
   const dial = place.phone?.replace(/[^+0-9]/g, '');
   return <CircleMarker center={[place.latitude, place.longitude]} radius={selected ? 12 : 9} bubblingMouseEvents={false}
-    pathOptions={{ color: selected ? '#fff2bb' : '#10243a', weight: selected ? 3 : 2, fillColor: ({ police: '#75baff', fire: '#ff9b77', hospital: '#ff7893', mosque: '#8ae0af', temple: '#c9a2ff', market: '#ffd477', school: '#83d2f8', college: '#8db9ff', university: '#a59df5' } as Record<string, string>)[place.category], fillOpacity: 1 }}
+    pathOptions={{ color: selected ? '#fff2bb' : '#10243a', weight: selected ? 3 : 2, fillColor: ({ police: '#75baff', fire: '#ff9b77', hospital: '#ff7893', pharmacy: '#9ce3b8', mosque: '#8ae0af', temple: '#c9a2ff', market: '#ffd477', school: '#83d2f8', college: '#8db9ff', university: '#a59df5' } as Record<string, string>)[place.category], fillOpacity: 1 }}
     eventHandlers={{ click: () => { onSelect(place.id); map.flyTo([place.latitude, place.longitude], Math.max(map.getZoom(), 16), { duration: .6 }); } }}>
     <Tooltip>{place.name}</Tooltip>
     <Popup><div className="place-popup"><strong>{place.name}</strong><span>{place.address || (bn ? 'ঠিকানা দেওয়া নেই' : 'Address not listed')}</span><small>{placeDistance(place.distanceMeters, language)} {bn ? 'সরলরেখায়' : 'straight-line distance'}</small>

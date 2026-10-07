@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { createWebServer, complaintCsv } = require('./web.cjs');
 
 test('web API protects reports and revokes disabled staff sessions', async () => {
-  const { server, database } = await createWebServer({ databasePath: ':memory:', setupKey: 'test-setup-key', nearbyPlaces: async payload => ({ category: payload.category, radiusMeters: 6000, places: [], partial: false, source: 'test' }) });
+  const { server, database } = await createWebServer({ databasePath: ':memory:', setupKey: 'test-setup-key', nearbyPlaces: async payload => ({ category: payload.category, radiusMeters: 6000, places: [], partial: false, source: 'test' }), routeWatch: async (_store, payload) => ({ origin: payload.origin, destination: payload.destination, path: [payload.origin, payload.destination], distanceMeters: 1200, durationSeconds: 200, alerts: [], corridorMeters: 500, source: 'test' }) });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   const call = async (method, payload = {}, cookie, origin) => {
@@ -28,8 +28,10 @@ test('web API protects reports and revokes disabled staff sessions', async () =>
     const citizen = await call('register', { name: 'First Citizen', email: 'first@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     const neighbor = await call('register', { name: 'Second Citizen', email: 'second@example.test', area: 'DNCC Ward 15', password: 'citizen-password-123' });
     assert.equal((await call('nearbyPlaces', { latitude: 23.747, longitude: 90.375, category: 'police' })).response.status, 401);
+    assert.equal((await call('routeWatch', { origin: { latitude: 23.747, longitude: 90.375 }, destination: { latitude: 23.75, longitude: 90.39 } })).response.status, 401);
     assert.equal((await call('nearbyPlaces', { latitude: 23.747, longitude: 90.375, category: 'police' }, owner.cookie)).body.data.category, 'police');
     assert.equal((await call('nearbyPlaces', { latitude: 23.747, longitude: 90.375, category: 'police' }, citizen.cookie)).body.data.category, 'police');
+    assert.equal((await call('routeWatch', { origin: { latitude: 23.747, longitude: 90.375 }, destination: { latitude: 23.75, longitude: 90.39 } }, citizen.cookie)).body.data.distanceMeters, 1200);
     assert.equal((await call('snapshot', {}, citizen.cookie, 'http://evil.invalid')).response.status, 403);
     assert.equal((await call('snapshot')).response.status, 401);
     const created = await call('create', { title: 'Crossing curb is broken', description: 'Residents have to step into traffic to pass this curb.', categoryId: 1, area: 'DNCC Ward 15', wardCode: 'DNCC-15', placeName: 'Dhanmondi Lake east gate', latitude: 23.7468, longitude: 90.3754, severity: 'High', image: 'data:image/png;base64,AAAA' }, citizen.cookie);
@@ -45,7 +47,10 @@ test('web API protects reports and revokes disabled staff sessions', async () =>
     await call('manage', { type: 'user', name: 'Road Worker', email: 'staff@example.test', password: 'staff-password-123', role: 'staff', departmentId: 1 }, owner.cookie);
     const admin = await call('login', { email: 'admin@example.test', password: 'admin-password-123' });
     const staff = await call('login', { email: 'staff@example.test', password: 'staff-password-123' });
-    for (const cookie of [admin.cookie, staff.cookie]) assert.equal((await call('nearbyPlaces', { latitude: 23.747, longitude: 90.375, category: 'hospital' }, cookie)).body.data.category, 'hospital');
+    for (const cookie of [admin.cookie, staff.cookie]) {
+      assert.equal((await call('nearbyPlaces', { latitude: 23.747, longitude: 90.375, category: 'hospital' }, cookie)).body.data.category, 'hospital');
+      assert.equal((await call('routeWatch', { origin: { latitude: 23.747, longitude: 90.375 }, destination: { latitude: 23.75, longitude: 90.39 } }, cookie)).body.data.distanceMeters, 1200);
+    }
     for (const cookie of [owner.cookie, admin.cookie, staff.cookie, citizen.cookie, neighbor.cookie]) {
       const area = await call('areaSummary', { query: 'DNCC Ward 15' }, cookie);
       assert.equal(area.body.data.total, 1);
